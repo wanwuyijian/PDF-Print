@@ -131,7 +131,13 @@ class OutputParams:
     render_dpi: int = 200            # 打印阶段的分辨率
     out_dpi: int = 200               # 扫描阶段的分辨率（低于 render_dpi 会丢失细节，更真实）
     out_format: str = "pdf"
-    out_dir: str = ""                # 空 = 使用默认 output 目录
+    out_dir: str = ""                # 输出目录；空 = 使用默认 output 目录
+    # 可选的输出文件名（不含路径，留空 = 按源文件名自动生成）。
+    # 与 out_dir 组合起来就是完整的输出文件路径 —— 界面上的「另存为…」按钮
+    # 会一次性把目录和文件名都填好。刻意不把两者合成一个字符串字段：
+    # 只靠"有没有扩展名"去猜用户填的是目录还是文件，必然会猜错
+    # （用户想写 D:\扫描\合同扫描件 这种无扩展名的文件名时会被误当成目录）。
+    out_name: str = ""
     name_suffix: str = "_scan"       # 输出文件名后缀
     jpeg_in_pdf: bool = True         # PDF 内嵌图像使用 JPEG（体积小）
     open_folder_after: bool = False  # 完成后打开输出目录

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import queue
@@ -28,7 +29,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image
 
-from . import engine, logsetup, paper
+from . import engine, logsetup, paper, paths
 from .config import (BUILTIN_PRESETS, OUTPUT_FORMATS, ORIENTATIONS,
                      PRESET_ORDER, PRINT_MODES, SCALE_MODES, LayoutParams,
                      OutputParams, PrintParams, RenderJob, ScanParams)
@@ -213,6 +214,7 @@ class App(tk.Tk):
         self.v_out_dpi = tk.StringVar(value="200")
         self.v_format = tk.StringVar(value=OUTPUT_FORMATS["pdf"])
         self.v_outdir = tk.StringVar(value=str(default_output_dir()))
+        self.v_outname = tk.StringVar(value="")
         self.v_suffix = tk.StringVar(value="_scan")
         self.v_seed = tk.StringVar(value="0")
         self.v_openfolder = tk.BooleanVar(value=False)
@@ -304,7 +306,12 @@ class App(tk.Tk):
                  "对列表首个文件的第一页按当前参数快速渲染一张预览图，\n用于调参数，不产生输出文件。")
 
         ttk.Button(bar, text="关于", command=self.show_about).pack(side="right", padx=2)
+        ttk.Button(bar, text="环境报告", command=self.show_environment_report).pack(
+            side="right", padx=2)
         ttk.Button(bar, text="日志目录", command=self.open_log_dir).pack(side="right", padx=2)
+        _Tooltip(bar.winfo_children()[-3],
+                 "生成一份运行环境体检报告（系统版本、数据目录可写性、临时目录等），\n"
+                 "换电脑后遇到问题时，把这个文件一起发给开发者最快定位。")
 
     # ---- 左：文件列表 ----
     def _build_file_panel(self, parent):
@@ -566,6 +573,27 @@ class App(tk.Tk):
         ttk.Entry(od, textvariable=self.v_outdir).grid(row=0, column=0, sticky="ew")
         ttk.Button(od, text="浏览…", width=8,
                    command=self.pick_outdir).grid(row=0, column=1, padx=(4, 0))
+        _Tooltip(od, "处理结果保存到哪。留空则使用 exe 同目录的 output 文件夹。")
+        r += 1
+
+        ttk.Label(p, text="输出文件名", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        on = ttk.Frame(p)
+        on.grid(row=r, column=1, columnspan=2, sticky="ew", pady=2)
+        on.columnconfigure(0, weight=1)
+        ttk.Entry(on, textvariable=self.v_outname).grid(row=0, column=0, sticky="ew")
+        ttk.Button(on, text="另存为…", width=8,
+                   command=self.pick_outname).grid(row=0, column=1, padx=(4, 0))
+        ttk.Button(on, text="清除", width=6,
+                   command=lambda: self.v_outname.set("")).grid(row=0, column=2, padx=(4, 0))
+        _Tooltip(on, "留空 = 按源文件名自动生成（如「合同_scan.pdf」）。\n"
+                     "填了则用这个名字；批量多个文件时自动加序号避免互相覆盖。\n"
+                     "点「另存为…」可直接指定完整路径，扩展名按输出格式自动修正。")
+        r += 1
+
+        ttk.Label(p, style="Hint.TLabel", wraplength=400, justify="left",
+                  text="完整输出路径 = 输出目录 + 输出文件名 + 自动扩展名\n"
+                       "（同名文件不会被覆盖，会自动追加序号）").grid(
+            row=r, column=1, columnspan=2, sticky="w", pady=(0, PAD))
         r += 1
 
         ttk.Checkbutton(p, text="处理完成后自动打开输出目录",
@@ -574,6 +602,12 @@ class App(tk.Tk):
 
         self._sync_format()
         self._on_paper_change()
+        # 输出路径变化时在状态栏给出「最终会写到哪里」的即时反馈
+        for v in (self.v_outdir, self.v_outname):
+            try:
+                v.trace_add("write", lambda *a: self._trace_output_target())
+            except Exception:
+                pass
 
     # ---- 底部 ----
     def _build_bottom(self, parent):
@@ -758,6 +792,57 @@ class App(tk.Tk):
         if d:
             self.v_outdir.set(d)
 
+    def pick_outname(self):
+        """「另存为…」：一次性指定完整输出路径（目录 + 文件名）"""
+        fmt_key = self.v_format.get()
+        ext = {"pdf": ".pdf", "png": ".png", "jpg": ".jpg",
+               "pdf_img": ".pdf"}.get(fmt_key, ".pdf")
+        d = self.v_outdir.get().strip() or str(default_output_dir())
+        src = self.tree.selection()
+        stem = Path(src[0]).stem if src else "扫描结果"
+        initial = str(Path(d) / f"{stem}_scan{ext}")
+        chosen = filedialog.asksaveasfilename(
+            title="指定输出文件（目录与文件名会分别填入）",
+            initialdir=d, initialfile=Path(initial).name,
+            defaultextension=ext,
+            filetypes=[("PDF 文件", "*.pdf"), ("PNG 图片", "*.png"),
+                       ("JPEG 图片", "*.jpg")])
+        if chosen:
+            p = Path(chosen)
+            self.v_outdir.set(str(p.parent))
+            self.v_outname.set(p.stem)     # 扩展名由输出格式决定，不用手填
+            self.v_status.set(f"输出路径：{p.parent}\\{p.stem}{ext}")
+
+    def _preview_output_path(self) -> str:
+        """给界面/提示用的「最终会写到哪里」预览文本"""
+        try:
+            r = engine.resolve_output_targets(
+                OutputParams(out_format=self.v_format.get().strip() or "pdf",
+                             out_dir=self.v_outdir.get().strip(),
+                             out_name=self.v_outname.get().strip()),
+                Path(self.tree.selection()[0]) if self.tree.selection()
+                else Path("示例.pdf"))
+            if r["pdf"]:
+                return str(r["pdf"])
+            if r["want_img"]:
+                return str(r["dir"] / f"{r['base']}_p001{r['img_ext']}") + " …"
+        except Exception:
+            pass
+        return self.v_outdir.get().strip() or str(default_output_dir())
+
+    def _trace_output_target(self):
+        """跟踪实际写入目标（日志里能看到），并顺手更新状态栏"""
+        try:
+            tgt = self.v_outname.get().strip()
+            if tgt:
+                d = self.v_outdir.get().strip() or "默认 output 目录"
+                msg = f"将输出到：{d}\\{tgt}"
+            else:
+                msg = f"将输出到：{self._preview_output_path()}"
+            self.v_status.set(msg)
+        except Exception:
+            pass
+
     def open_log_dir(self):
         self._open_path(str(logsetup.paths.log_dir()))
 
@@ -840,6 +925,7 @@ class App(tk.Tk):
             out_dpi=int(self.v_out_dpi.get()),
             out_format=mode_key,
             out_dir=self.v_outdir.get().strip(),
+            out_name=self.v_outname.get().strip(),
             name_suffix=self.v_suffix.get().strip(),
             jpeg_in_pdf=True,
             open_folder_after=bool(self.v_openfolder.get()),
@@ -954,6 +1040,7 @@ class App(tk.Tk):
                            f"[{_i}/{len(files)}] {_f.name}  {m}"))
 
                 res = engine.process_pdf(f, sub_job, out_dir=outdir,
+                                         file_index=i, file_count=len(files),
                                          progress=progress,
                                          should_cancel=self.cancel_flag.is_set)
                 if res.ok:
@@ -1065,6 +1152,16 @@ class App(tk.Tk):
 
     # ---------------- 关于 / 崩溃 ----------------
     def show_about(self):
+        # 部署体检：把跨机使用最容易出问题的几项直接摆在用户面前，
+        # 免得"日志在哪""为什么双击没反应"这类问题还要靠猜。
+        import platform
+        import sys as _sys
+        mode = "单文件 exe（绿色版）" if paths.is_frozen() else "源码运行"
+        root_ok, root_why = paths.writable_root_status()
+        tmp_ok, tmp_why = paths.temp_dir_status()
+        arch = platform.machine()
+        bits = "64 位" if _sys.maxsize > 2 ** 32 else "32 位"
+
         messagebox.showinfo(
             "关于",
             f"{APP_NAME}\n版本 {__version__}（{BUILD_DATE}）\n\n"
@@ -1072,8 +1169,51 @@ class App(tk.Tk):
             f"· 黑白激光 / 彩色激光 / 彩色喷墨 三种打印引擎\n"
             f"· 纸底、云斑、噪点、模糊、倾斜、暗角 全套扫描劣化\n"
             f"· 可指定 A3/A4/A5/A6/B4/B5/16开/Letter 等输出纸张\n"
-            f"· 全量运行日志与崩溃日志，便于排查问题\n\n"
-            f"日志目录：\n{logsetup.paths.log_dir()}")
+            f"· 可指定输出目录与文件名\n"
+            f"· 全量运行日志与崩溃日志，便于排查问题\n"
+            f"· 崩溃时自动弹出日志位置\n\n"
+            f"──────────  运行环境  ──────────\n"
+            f"运行模式  ：{mode}\n"
+            f"系统      ：{platform.system()} {platform.release()}（{arch} {bits}）\n"
+            f"Python    ：{platform.python_version()}\n\n"
+            f"──────────  数据与日志  ──────────\n"
+            f"{'✓' if root_ok else '✗'} 数据目录：{root_why}\n"
+            f"{'✓' if tmp_ok else '✗'} 临时目录：{tmp_why}\n\n"
+            f"程序目录：{paths.app_dir()}\n"
+            f"日志目录：{logsetup.paths.log_dir()}\n"
+            f"输出目录：{self.v_outdir.get().strip() or default_output_dir()}")
+
+    def show_environment_report(self):
+        """把运行环境与体检结果写到日志文件（出问题时让用户直接发这个文件）"""
+        import platform
+        root_ok, root_why = paths.writable_root_status()
+        tmp_ok, tmp_why = paths.temp_dir_status()
+        txt = "\n".join([
+            "=" * 60,
+            f"{APP_NAME} v{__version__} 运行环境报告",
+            "=" * 60,
+            f"时间        ：{_dt.datetime.now():%Y-%m-%d %H:%M:%S}",
+            f"运行模式    ：{'打包 exe' if paths.is_frozen() else '源码'}",
+            f"可执行文件  ：{sys.executable}",
+            f"程序目录    ：{paths.app_dir()}",
+            f"数据根目录  ：{paths.writable_root()}",
+            f"日志目录    ：{logsetup.paths.log_dir()}",
+            f"输出目录    ：{self.v_outdir.get().strip() or default_output_dir()}",
+            f"绿色模式    ：{'是' if paths.is_portable() else '否（程序目录不可写）'}",
+            f"操作系统    ：{platform.system()} {platform.release()} ({platform.version()})",
+            f"架构        ：{platform.machine()}",
+            f"Python      ：{platform.python_version()}",
+            f"数据目录体检：{'OK  ' if root_ok else 'FAIL'} {root_why}",
+            f"临时目录体检：{'OK  ' if tmp_ok else 'FAIL'} {tmp_why}",
+            "=" * 60,
+        ])
+        p = logsetup.paths.log_dir() / f"env_{_dt.datetime.now():%Y-%m-%d_%H%M%S}.txt"
+        p.write_text(txt, encoding="utf-8")
+        log.info("已生成运行环境报告: %s", p)
+        self.v_status.set(f"运行环境报告已保存：{p.name}")
+        messagebox.showinfo("运行环境报告", f"已保存到：\n{p}\n\n"
+                                          f"发问题时请把这个文件一起附上。")
+        return p
 
     def _on_crash(self, log_path: Path, exc_text: str):
         """崩溃回调（在异常现场被调用），把日志路径告诉用户"""
@@ -1163,6 +1303,7 @@ class App(tk.Tk):
         if op.out_dir:
             self.v_outdir.set(op.out_dir)
         self.v_suffix.set(op.name_suffix)
+        self.v_outname.set(op.out_name)
         self.v_seed.set(str(op.seed))
         self.v_openfolder.set(op.open_folder_after)
         self.v_pages.set(job.pages)

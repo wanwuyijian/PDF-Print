@@ -27,8 +27,9 @@ except ImportError:                     # 兼容旧别名
     import fitz  # type: ignore
 
 from . import effects, paper
-from .config import RenderJob
+from .config import OutputParams, RenderJob
 from .logsetup import get_logger, log_exception, set_context, clear_context
+from .paths import default_output_dir
 
 log = get_logger("app.engine")
 
@@ -294,14 +295,78 @@ def ImageFilter_Gaussian(radius: float):
 # --------------------------------------------------------------------------- #
 # 主处理函数
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# 输出目标推导
+# --------------------------------------------------------------------------- #
+def _unique_path(p: Path) -> Path:
+    """
+    若目标文件已存在，自动追加 _1 / _2 … 直到不冲突。
+    不静默覆盖用户已有文件 —— 处理结果丢了还能再跑一遍，用户的原文件丢了找不回来。
+    """
+    if not p.exists():
+        return p
+    stem, suffix, parent = p.stem, p.suffix, p.parent
+    for i in range(1, 1000):
+        q = parent / f"{stem}_{i}{suffix}"
+        if not q.exists():
+            log.info("目标文件已存在，改写为: %s", q.name)
+            return q
+    raise RuntimeError(f"同名文件过多，无法生成新文件名: {p}")
+
+
+def resolve_output_targets(op: OutputParams,
+                           src_path: Path,
+                           out_dir: str | Path | None = None,
+                           file_index: int = 0,
+                           file_count: int = 1) -> dict:
+    """
+    推导本次处理要写到哪里。
+
+    目录来源优先级：显式 out_dir 参数 > op.out_dir > 默认 output 目录
+    文件名来源：op.out_name（用户指定）> 源文件名 + name_suffix
+
+    多文件批量且指定了 out_name 时，自动追加序号避免互相覆盖
+    （合同扫描件_1.pdf、合同扫描件_2.pdf …）。
+
+    :return: {"dir": Path, "base": str, "pdf": Path|None, "img_ext": str,
+              "want_pdf": bool, "want_img": bool}
+    """
+    want_pdf = op.out_format in ("pdf", "pdf_img")
+    want_img = op.out_format in ("png", "jpg", "pdf_img")
+    img_ext = ".jpg" if op.out_format in ("jpg", "pdf_img") else ".png"
+
+    target_dir = Path(out_dir) if out_dir else (
+        Path(op.out_dir) if op.out_dir else default_output_dir())
+    # 用户可能把完整路径粘进"输出文件名"里，这里取最后一段当文件名用
+    raw_name = (op.out_name or "").strip().strip('"').strip()
+    if raw_name:
+        base = Path(raw_name.replace("\\", "/")).stem or "output"
+        if file_count > 1:
+            base = f"{base}_{file_index + 1}"
+    else:
+        base = src_path.stem + (op.name_suffix or "")
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    pdf_path = _unique_path(target_dir / f"{base}.pdf") if want_pdf else None
+
+    return {"dir": target_dir, "base": base, "pdf": pdf_path,
+            "img_ext": img_ext, "want_pdf": want_pdf, "want_img": want_img}
+
+
 def process_pdf(src_path: str | Path,
                 job: RenderJob,
                 out_dir: str | Path | None = None,
                 progress=None,
-                should_cancel=None) -> ProcessResult:
+                should_cancel=None,
+                file_index: int = 0,
+                file_count: int = 1) -> ProcessResult:
     """
     处理一个 PDF。
 
+    :param out_dir:      输出目录（当 job.output_params.out_path 为空时生效）
+    :param file_index:   本文件在批量中的序号（0 基），用于 out_path 指定时的自动改名
+    :param file_count:   批量文件总数
     :param progress:      callable(done:int, total:int, msg:str) 进度回调
     :param should_cancel: callable() -> bool 返回 True 时中断（抛 Cancelled）
     :return: ProcessResult
@@ -343,23 +408,20 @@ def process_pdf(src_path: str | Path,
         # 输出目录 / 文件名
         first_page = doc.load_page(indices[0])
         src_size_mm = page_size_mm(first_page)
-        if out_dir is None:
-            out_dir = Path(op.out_dir) if op.out_dir else None
-        if out_dir is None:
-            from .paths import default_output_dir
-            out_dir = default_output_dir()
-        out_dir.mkdir(parents=True, exist_ok=True)
 
-        base = src_path.stem + (op.name_suffix or "")
-        want_pdf = op.out_format in ("pdf", "pdf_img")
-        want_img = op.out_format in ("png", "jpg", "pdf_img")
-        img_ext = ".png" if op.out_format == "png" else ".jpg"
-        if op.out_format == "jpg":
-            img_ext = ".jpg"
-
-        pdf_path = out_dir / f"{base}.pdf"
+        tgt = resolve_output_targets(op, src_path, out_dir, file_index, file_count)
+        out_dir = tgt["dir"]
+        base = tgt["base"]
+        want_pdf = tgt["want_pdf"]
+        want_img = tgt["want_img"]
+        img_ext = tgt["img_ext"]
+        pdf_path = tgt["pdf"]
         if want_pdf:
             out_pdf = fitz.open()
+        if want_pdf and pdf_path is not None:
+            log.info("输出目标: %s", pdf_path)
+        elif want_img:
+            log.info("输出目标: %s\\%s_pNNN%s", out_dir, base, img_ext)
 
         # 随机种子
         if op.seed:
@@ -425,7 +487,7 @@ def process_pdf(src_path: str | Path,
                 newp.insert_image(fitz.Rect(0, 0, pw_pt, ph_pt), stream=data)
 
             if want_img:
-                ipath = out_dir / f"{base}_p{order + 1:03d}{img_ext}"
+                ipath = _unique_path(out_dir / f"{base}_p{order + 1:03d}{img_ext}")
                 with open(ipath, "wb") as fh:
                     fh.write(data)
                 outputs.append(str(ipath))

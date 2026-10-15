@@ -131,6 +131,32 @@ def run_selftest() -> tuple[bool, str]:
         probe.unlink()
         c.detail = str(d)
 
+    with _check("数据根目录可写（跨机部署关键项）") as c:
+        ok, why = paths.writable_root_status()
+        assert ok, why
+        mode = "绿色模式（程序所在目录）" if paths.is_portable() else \
+               "已回落到用户目录（程序目录不可写）"
+        c.detail = f"{mode}｜{why}"
+
+    with _check("系统临时目录可用（单文件 exe 解压需要）") as c:
+        ok, why = paths.temp_dir_status()
+        assert ok, why
+        c.detail = why
+
+    with _check("崩溃日志在当前数据目录可写") as c:
+        # 跨机最常见的坑：exe 放在只读位置时崩溃日志写不出来。
+        # 这里在**实际解析出来的**目录里做一次真实写入-删除。
+        try:
+            raise RuntimeError("selftest 目录探测用异常")
+        except RuntimeError:
+            f = logsetup.write_crash_report(*sys.exc_info(), source="selftest")
+        assert f and f.exists(), "崩溃日志未生成"
+        assert f.parent == paths.log_dir(), \
+            f"崩溃日志不在日志目录：{f.parent}"
+        name = f.name
+        f.unlink()
+        c.detail = f"{name}（在 {f.parent} 成功写入后删除）"
+
     with _check("临时目录可写（exe 自解压目录）") as c:
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "x").write_text("1", encoding="utf-8")
@@ -301,7 +327,56 @@ def run_selftest() -> tuple[bool, str]:
             assert why, f"{bad!r} 拒绝时没有给出原因"
         c.detail = "abc / 1-x / 1--3 / 1.5 / 1_0 / 第3页 均被拒绝并说明原因"
 
-    # ================= 5. 崩溃日志链路 =================
+    # ================= 5. 输出路径指定（v1.0.3 新增）=================
+    with _check("输出路径：指定文件名精确生效") as c:
+        import tempfile as _tf
+        d = Path(_tf.mkdtemp(prefix="pdfprint_op_"))
+        try:
+            r = engine.process_pdf(
+                src,
+                RenderJob(PrintParams(mode="mono_laser"), ScanParams(),
+                          LayoutParams(paper="A5", margin_mm=6),
+                          OutputParams(render_dpi=72, out_dpi=72, out_format="pdf",
+                                       out_dir=str(d), out_name="我的合同扫描件",
+                                       seed=1)),
+                file_count=1)
+            assert r.ok, r.error
+            assert (d / "我的合同扫描件.pdf").exists(), \
+                f"未按指定文件名产出，实际 {[Path(p).name for p in r.outputs]}"
+            c.detail = f"指定「我的合同扫描件」→ 产出 {Path(r.outputs[0]).name}"
+        finally:
+            import shutil as _sh
+            _sh.rmtree(d, ignore_errors=True)
+
+    with _check("输出路径：批量自动加序号、同名不覆盖") as c:
+        import shutil as _sh
+        import tempfile as _tf
+        from dataclasses import replace as _replace
+        d = Path(_tf.mkdtemp(prefix="pdfprint_op2_"))
+
+        def mk(out_name):
+            return RenderJob(PrintParams(mode="mono_laser"), ScanParams(),
+                             LayoutParams(paper="A5", margin_mm=6),
+                             OutputParams(render_dpi=72, out_dpi=72,
+                                          out_format="pdf", out_dir=str(d),
+                                          out_name=out_name, seed=1))
+        try:
+            for i in range(3):
+                r = engine.process_pdf(src, mk("批量"), file_index=i, file_count=3)
+                assert r.ok, r.error
+            names = sorted(p.name for p in d.glob("*.pdf"))
+            assert names == ["批量_1.pdf", "批量_2.pdf", "批量_3.pdf"], names
+
+            engine.process_pdf(src, mk("重复"), file_count=1)
+            engine.process_pdf(src, mk("重复"), file_count=1)
+            again = sorted(p.name for p in d.glob("*.pdf"))
+            assert "重复.pdf" in again and "重复_1.pdf" in again, \
+                f"同名文件未被保护：{again}"
+            c.detail = "批量→批量_1/2/3.pdf；同名→重复.pdf + 重复_1.pdf"
+        finally:
+            _sh.rmtree(d, ignore_errors=True)
+
+    # ================= 6. 崩溃日志链路 =================
     with _check("崩溃日志写入") as c:
         try:
             raise RuntimeError("selftest 故意抛出的异常（用于验证崩溃记录链路）")

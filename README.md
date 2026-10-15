@@ -1,9 +1,9 @@
 # PDF 打印扫描模拟器
 
-[![版本](https://img.shields.io/badge/版本-v1.0.1-3a7bd8)](https://github.com/wanwuyijian/PDF-Print/releases)
+[![版本](https://img.shields.io/badge/版本-v1.0.3-3a7bd8)](https://github.com/wanwuyijian/PDF-Print/releases)
 [![平台](https://img.shields.io/badge/平台-Windows%20|%20Linux%20|%20macOS-0075c4)]()
 [![Python](https://img.shields.io/badge/Python-3.10+-3776ab)](https://www.python.org/)
-[![自检](https://img.shields.io/badge/自检-27%2F27%20通过-4c1)](https://github.com/wanwuyijian/PDF-Print)
+[![自检](https://img.shields.io/badge/自检-32%2F32%20通过-4c1)](https://github.com/wanwuyijian/PDF-Print)
 
 把 PDF 电子文档模拟成 **「打印机打印过、再被扫描仪扫成黑白件」** 的样子。
 
@@ -13,12 +13,12 @@
 
 ## 📥 下载
 
-**最新版：[`PDF-Print-Simulator_v1.0.1.exe`](https://github.com/wanwuyijian/PDF-Print/releases/download/v1.0.1/PDF-Print-Simulator_v1.0.1.exe)**（48.4 MB，单文件免安装）
+**最新版：[`PDF-Print-Simulator_v1.0.3.exe`](https://github.com/wanwuyijian/PDF-Print/releases/download/v1.0.3/PDF-Print-Simulator_v1.0.3.exe)**（48.4 MB，单文件免安装）
 
 或前往 **[Releases 页面](https://github.com/wanwuyijian/PDF-Print/releases)** 查看全部版本。
 
 > 附件名用英文是因为 GitHub 会自动剔除 Release 附件名里的非 ASCII 字符，
-> 中文名上传后会被洗成 `PDF._v1.0.1.exe`。程序本身的中文名和界面不受影响。
+> 中文名上传后会被洗成 `PDF._v1.0.3.exe`。程序本身的中文名和界面不受影响。
 
 <details>
 <summary>不想下载 exe？自己打包（约 1 分钟）</summary>
@@ -37,14 +37,29 @@ python tools/build.py
 
 | 项 | 要求 |
 |---|---|
-| 操作系统 | Windows / Linux / macOS（tkinter 需系统自带） |
+| 操作系统 | Windows 10 / 11（x86-64）；Linux / macOS 亦可运行源码版 |
 | 内存 | 建议 2GB 以上（处理 A4@300dpi 单页约占 500MB） |
-| 安装 | **无需安装**，无需 Python 环境 |
+| 安装 | **无需安装**，无需 Python 环境，无需联网 |
+| 磁盘 | 系统临时目录需约 200MB 可用空间（单文件 exe 启动时解压运行环境） |
+
+### 跨机使用 / 绿色部署
+
+把 exe **单独复制**到另一台 Windows 10/11 电脑，双击即可运行：
+
+- 不需要装 Python，不需要装任何运行库
+- 日志、崩溃日志、参数配置自动建在 exe 旁边（绿色模式）
+- 若 exe 所在目录不可写（如 `C:\Program Files`、只读介质、网络盘），
+  会**自动改用** `%LOCALAPPDATA%\PdfPrintScanSimulator`，并在「关于」窗口说明
+- 换电脑后遇到问题，点工具栏「**环境报告**」生成一份体检文件发出来即可
+
+> **SmartScreen 提示**：程序未做代码签名。若 exe 是从浏览器下载的，
+> Windows 可能提示「Windows 已保护你的电脑」——点「**更多信息 → 仍要运行**」即可。
+> 从 U 盘、局域网或资源管理器直接复制通常不会触发。
 
 ### 出问题时先跑自检
 
 ```bash
-PDF打印扫描模拟器_v1.0.0.exe --selftest
+PDF打印扫描模拟器_v1.0.3.exe --selftest
 ```
 
 跑完弹窗给结论，并生成报告文件到 `logs/selftest_*.txt`，用于快速区分「环境问题」与「代码问题」。
@@ -92,6 +107,11 @@ PDF打印扫描模拟器_v1.0.0.exe --selftest
 
 ![主界面](docs/主界面.png)
 
+「版式与输出」页可自由指定**输出目录**与**输出文件名**，「另存为…」一键填好完整路径；
+同名文件自动加序号，不会覆盖你已有的文件。
+
+![版式与输出](docs/版式与输出.png)
+
 预览窗口：模糊度、噪点、倾斜度三个核心滑块拖动即时生效，调好后一键回填主界面。
 
 ![预览窗口](docs/预览窗口.png)
@@ -106,10 +126,12 @@ PDF打印扫描模拟器_v1.0.0.exe --selftest
 | 2 | 彩色打印机打印 → 黑白扫描 | 彩色激光（CMYK 四色叠印）、彩色喷墨两个引擎 |
 | 3 | 可设输出纸张尺寸 | 12 种标准纸 + 自定义 + 保持原页面尺寸 |
 | 4 | 效果预览实时调参 | 模糊度 / 噪点 / 倾斜度拖动即生效，可回填主界面 |
-| 5 | 批量处理 | 一次多选 PDF，后台线程处理，可随时取消 |
-| 6 | 版本管理 | 版本号单一来源，exe 属性自动同步 |
-| 7 | 日志与崩溃记录 | 运行日志 + 独立崩溃快照（含全部线程栈与崩溃现场参数） |
-| 8 | 自检模式 | `--selftest` 27 项检查，一条命令定位问题 |
+| 5 | **指定输出文件路径** | 输出目录 + 输出文件名自由组合，「另存为…」一键指定；同名自动加序号不覆盖 |
+| 6 | 批量处理 | 一次多选 PDF，后台线程处理，可随时取消 |
+| 7 | 版本管理 | 版本号单一来源，exe 属性自动同步 |
+| 8 | 日志与崩溃记录 | 运行日志 + 独立崩溃快照（含全部线程栈与崩溃现场参数）+ 环境体检报告 |
+| 9 | 自检模式 | `--selftest` 32 项检查，一条命令定位问题 |
+| 10 | 跨机直接可用 | 单文件 exe 复制到任意 Windows 10/11 即可运行，无需安装、无需 Python |
 
 支持的纸张：`A3` `A4` `A5` `A6` `B4` `B5` `16开` `32开` `Letter` `Legal` `54×86mm` `38×26mm` `自定义` `保持原尺寸`
 
@@ -187,7 +209,7 @@ PDF打印扫描模拟器_v1.0.0.exe --selftest
 版本号只在一处定义：`src/app/version.py`
 
 ```python
-__version__ = "1.0.1"
+__version__ = "1.0.3"
 BUILD_DATE  = "2026-10-15"
 ```
 
@@ -198,7 +220,7 @@ python tools/build.py            # 正式构建（无控制台窗口）
 python tools/build.py --debug    # 保留控制台窗口，方便看报错
 ```
 
-产物：`dist/PDF打印扫描模拟器_v1.0.0.exe`（单文件，免安装）
+产物：`dist/PDF打印扫描模拟器_v1.0.3.exe`（单文件，免安装）
 
 版本变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 

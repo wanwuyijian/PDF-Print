@@ -87,3 +87,64 @@ def default_output_dir() -> Path:
     d = writable_root() / "output"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# --------------------------------------------------------------------------- #
+# 可移植性诊断
+# --------------------------------------------------------------------------- #
+def is_portable() -> bool:
+    """数据目录是否就落在程序旁边（绿色模式）"""
+    return writable_root() == app_dir()
+
+
+def data_root_note() -> str:
+    """一句话说明数据/日志落在哪，方便用户找日志"""
+    root = writable_root()
+    if is_portable():
+        return f"数据与日志目录：{root}（程序所在目录）"
+    return (f"数据与日志目录：{root}\n"
+            f"（程序所在目录不可写，已自动改用用户目录；"
+            f"如需放回程序旁边，请把程序移到有写入权限的位置）")
+
+
+def writable_root_status() -> tuple[bool, str]:
+    """
+    检查数据根目录是否真的能写，并返回原因。
+    用于自检：跨机部署时最常见的问题就是"日志目录不可写"。
+    """
+    root = writable_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        probe = root / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True, f"可写：{root}"
+    except Exception as e:
+        return False, f"不可写：{root}（{type(e).__name__}: {e}）"
+
+
+def temp_dir_status() -> tuple[bool, str]:
+    """
+    检查系统临时目录可用性。
+
+    打包成单文件 exe 后，PyInstaller 启动时会把整个运行环境解压到
+    临时目录（约 200MB）。如果临时目录不可用，程序会在 Python 代码
+    还没跑起来之前就失败，用户只能看到一个没有信息量的报错。
+    这里提前探测，至少能在日志与自检里说清楚。
+    """
+    import shutil
+    import tempfile
+    tmp = Path(tempfile.gettempdir())
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(tmp)
+        free_gb = usage.free / 1024 ** 3
+        if free_gb < 0.5:
+            return False, (f"临时目录 {tmp} 剩余空间仅 {free_gb:.2f} GB，"
+                           f"不足以解压运行环境（需约 0.5 GB）")
+        probe = tmp / ".pdfprint_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True, f"可写：{tmp}（剩余 {free_gb:.1f} GB）"
+    except Exception as e:
+        return False, f"临时目录不可用：{tmp}（{type(e).__name__}: {e}）"
