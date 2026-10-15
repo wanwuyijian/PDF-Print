@@ -1,6 +1,52 @@
 # PDF 打印扫描模拟器
 
-把 PDF 电子文档模拟成**「打印机打印过、再被扫描仪扫成黑白件」**的样子。
+[![版本](https://img.shields.io/badge/版本-v1.0.1-3a7bd8)](https://github.com/wanwuyijian/PDF-Print/releases)
+[![平台](https://img.shields.io/badge/平台-Windows%20|%20Linux%20|%20macOS-0075c4)]()
+[![Python](https://img.shields.io/badge/Python-3.10+-3776ab)](https://www.python.org/)
+[![自检](https://img.shields.io/badge/自检-27%2F27%20通过-4c1)](https://github.com/wanwuyijian/PDF-Print)
+
+把 PDF 电子文档模拟成 **「打印机打印过、再被扫描仪扫成黑白件」** 的样子。
+
+单文件 exe，免安装，双击即用。
+
+---
+
+## 📥 下载
+
+前往 **[Releases 页面](https://github.com/wanwuyijian/PDF-Print/releases)** 下载 `PDF 打印扫描模拟器_v1.0.1.exe`。
+
+<details>
+<summary>不想下载 exe？自己打包（约 1 分钟）</summary>
+
+```bash
+git clone https://github.com/wanwuyijian/PDF-Print.git
+cd PDF-Print
+pip install -r requirements.txt
+python tools/build.py
+```
+
+产物在 `dist/` 目录。
+</details>
+
+### 运行要求
+
+| 项 | 要求 |
+|---|---|
+| 操作系统 | Windows / Linux / macOS（tkinter 需系统自带） |
+| 内存 | 建议 2GB 以上（处理 A4@300dpi 单页约占 500MB） |
+| 安装 | **无需安装**，无需 Python 环境 |
+
+### 出问题时先跑自检
+
+```bash
+PDF打印扫描模拟器_v1.0.0.exe --selftest
+```
+
+跑完弹窗给结论，并生成报告文件到 `logs/selftest_*.txt`，用于快速区分「环境问题」与「代码问题」。
+
+---
+
+## 它是怎么做的
 
 不是简单套个滤镜 —— 程序按真实成像链路建模：
 
@@ -22,8 +68,6 @@
 | 纸底不是纯白，且有不均匀的云斑 | 纸基灰度 246 × 低频随机场 |
 | 深色区域噪点明显、白纸很干净 | 传感器噪点与 (1−亮度) 相关 |
 | 页面是歪的，边角还有点暗 | 进纸倾斜 + 边缘照度衰减 |
-
----
 
 ## 效果对比
 
@@ -49,46 +93,46 @@
 
 ---
 
-## 一、功能
+## 功能
 
-1. **两种打印效果 → 黑白扫描件**
-   - 黑白激光打印机（单色碳粉）
-   - 彩色激光打印机（CMYK 四色叠印）
-   - 彩色喷墨打印机（染料墨水）— 额外提供
+| # | 能力 | 说明 |
+|---|---|---|
+| 1 | 黑白打印机打印 → 黑白扫描 | 黑白激光引擎（单色碳粉），黑字真黑、字口锐利 |
+| 2 | 彩色打印机打印 → 黑白扫描 | 彩色激光（CMYK 四色叠印）、彩色喷墨两个引擎 |
+| 3 | 可设输出纸张尺寸 | 12 种标准纸 + 自定义 + 保持原页面尺寸 |
+| 4 | 效果预览实时调参 | 模糊度 / 噪点 / 倾斜度拖动即生效，可回填主界面 |
+| 5 | 批量处理 | 一次多选 PDF，后台线程处理，可随时取消 |
+| 6 | 版本管理 | 版本号单一来源，exe 属性自动同步 |
+| 7 | 日志与崩溃记录 | 运行日志 + 独立崩溃快照（含全部线程栈与崩溃现场参数） |
+| 8 | 自检模式 | `--selftest` 27 项检查，一条命令定位问题 |
 
-2. **可指定输出纸张尺寸**
-   A3 / A4 / A5 / A6 / B4 / B5 / 16开 / 32开 / Letter / Legal / 54×86mm / 38×26mm /
-   自定义尺寸 / 保持原页面尺寸；支持纵向、横向、自动；可设置页边距与缩放方式。
-
-3. **效果预览 + 实时调参**（内置独立窗口）
-   模糊度、噪点、倾斜度三个核心滑块拖动即时生效；调好后一键「应用到主界面」。
-
-4. **版本管理**：当前 `1.0.0`，版本号集中在 `src/app/version.py`。
-
-5. **日志与崩溃记录**：运行日志 + 独立崩溃日志，出问题直接把崩溃日志发出来即可定位。
+支持的纸张：`A3` `A4` `A5` `A6` `B4` `B5` `16开` `32开` `Letter` `Legal` `54×86mm` `38×26mm` `自定义` `保持原尺寸`
 
 ---
 
-## 二、快速开始
+## 快速开始
 
-双击 `PDF打印扫描模拟器_v1.0.0.exe`：
+1. 下载并运行 exe
+2. 点「添加 PDF…」选文件（可多选）
+3. 右上角挑一个**预设**，或自己调参数
+4. 点「效果预览」看效果，不满意就拖滑块，满意后点「应用到主界面」
+5. 点「开始处理」
 
-1. 点「添加 PDF…」选文件（可多选，支持批量）
-2. 右上角挑一个**预设**，或自己调参数
-3. 点「效果预览」看效果，不满意就拖滑块，满意后点「应用到主界面」
-4. 点「开始处理」，结果默认输出到 exe 同级的 `output` 目录
+输出默认落在 exe 同目录的 `output/` 文件夹。
 
 > 首次使用建议直接用预设里的「标准文档（推荐）」。
 
+内置预设：`标准文档` `轻印淡扫` `重印浓扫` `老旧复印机` `黑白二值扫描` `彩色打印→黑白扫描`
+
 ---
 
-## 三、参数说明
+## 参数说明
 
 ### 打印效果
 
 | 参数 | 作用 | 建议范围 |
 |---|---|---|
-| 打印引擎 | 决定墨的物理特性（详见上表） | — |
+| 打印引擎 | 决定墨的物理特性（见上表） | — |
 | 浓度 | 碳粉/墨量。>1 更黑更实，<1 淡印 | 0.8 ~ 1.2 |
 | 阶调对比 | 打印机成像的阶调对比 | 0.9 ~ 1.2 |
 | 墨点扩散 | 油墨在纸纤维上的毛细渗透，越大越糊 | 0.2 ~ 0.8 |
@@ -125,15 +169,21 @@
 | 输出格式 | 仅 PDF / 仅 PNG / 仅 JPG / PDF + 图片 |
 | 随机种子 | 0 = 每次随机；填固定值可 **100% 复现**同一效果 |
 
+### 小技巧
+
+- 想每次得到完全一样的结果？把「随机种子」从 0 改成固定数字（如 `12345`）
+- 「扫描分辨率」设得比「打印分辨率」低，细节会真的被丢掉 —— 这更接近现实
+- 「黑白二值扫描」得到只有纯黑纯白的文件，体积最小、字口最硬
+
 ---
 
-## 四、版本管理
+## 版本管理
 
 版本号只在一处定义：`src/app/version.py`
 
 ```python
-__version__ = "1.0.0"
-BUILD_DATE  = "2026-10-14"
+__version__ = "1.0.1"
+BUILD_DATE  = "2026-10-15"
 ```
 
 改动后重新打包，exe 会自动带上正确的文件版本、产品版本与中文名：
@@ -145,47 +195,34 @@ python tools/build.py --debug    # 保留控制台窗口，方便看报错
 
 产物：`dist/PDF打印扫描模拟器_v1.0.0.exe`（单文件，免安装）
 
-版本变更记录见 `CHANGELOG.md`。
+版本变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
-## 五、日志与故障排查
+## 日志与故障排查
 
 程序运行数据跟着 exe 走（exe 所在目录不可写时自动回落到 `%LOCALAPPDATA%\PdfPrintScanSimulator`）：
 
 ```
 logs/app_YYYY-MM-DD.log                 运行日志（按天切分，单文件 5MB，保留 5 份）
 logs/crash_YYYY-MM-DD_HHMMSS.log        崩溃日志（每次崩溃一个独立文件）
+logs/selftest_YYYY-MM-DD_HHMMSS.txt     自检报告
 config/last_state.json                  上次使用的参数（下次启动自动恢复）
 output/                                 默认输出目录
 ```
 
-**崩溃日志里包含**：程序版本、运行模式、系统与 Python 版本、完整 traceback、
-所有线程的调用栈，以及崩溃时正在处理的**文件路径与完整参数**。
+**崩溃日志里包含**：程序版本、运行模式、系统与 Python 版本、完整 traceback、所有线程的调用栈，以及崩溃时正在处理的**文件路径与完整参数**。
 
 > 遇到问题：把 `logs/crash_*.log` 发出来即可，不用复述现象。
-
-### 自检模式
-
-想先确认「是环境问题还是代码问题」，跑一次自检：
-
-```bash
-PDF打印扫描模拟器_v1.0.0.exe --selftest
-```
-
-它会逐项检查依赖、tkinter、目录可写性，跑通 5 种参数组合的完整处理链路，
-校验输出图像合理性、页面尺寸（A5=148×210mm / A3横向=420×297mm / 自定义尺寸）、
-二值模式是否真为纯黑白、随机种子能否复现，并验证崩溃日志链路可用。
-最后弹出结论并把报告写到 `logs/selftest_<时间戳>.txt`。
 
 程序内的「日志目录」按钮可以直接打开日志文件夹。
 
 ---
 
-## 六、目录结构
+## 目录结构
 
 ```
-PdfPrint/
+PDF-Print/
 ├── src/
 │   ├── main.py                  入口（设置 DPI 感知、兜住 stdout/stderr）
 │   └── app/
@@ -196,20 +233,20 @@ PdfPrint/
 │       ├── paper.py             纸张尺寸表与单位换算
 │       ├── effects.py           ★ 打印/扫描成像算法
 │       ├── engine.py            PDF 流水线 + 预览会话
+│       ├── selftest.py          自检模式
 │       └── gui.py               主界面 + 预览窗口
 ├── assets/icon.ico
-├── build/                       打包中间产物（version_info.txt 等）
-├── dist/                        打包产物
-├── tools/                       开发用脚本（造测试件、冒烟测试、保真度验证、打包）
-├── test/                        测试用 PDF 与对比图
-├── logs/  config/  output/      运行时生成
+├── tools/                       开发脚本（造测试件、测试、打包、截图）
+├── test/                        测试用 PDF
+├── docs/                        README 用图
+├── logs/  config/  output/      运行时生成（不入库）
 ├── README.md   CHANGELOG.md   使用说明.txt
 └── requirements.txt
 ```
 
 ---
 
-## 七、开发
+## 开发
 
 ```bash
 # 环境（需要带 tkinter 的 Python）
@@ -219,12 +256,13 @@ pip install -r requirements.txt
 cd src && python main.py
 
 # 测试
-python tools/make_sample.py test/sample.pdf     # 生成测试 PDF
-python tools/test_engine.py                     # 引擎冒烟测试
-python tools/test_gui.py                        # 界面构建测试
-python tools/test_preview.py                    # 预览实时调参测试
-python tools/test_fidelity.py                   # 预览与最终输出的保真度验证
-python tools/make_compare.py                    # 生成对比图
+python tools/make_sample.py test/sample.pdf   # 生成测试 PDF
+python tools/test_engine.py                   # 引擎冒烟测试
+python tools/test_gui.py                      # 界面构建测试
+python tools/test_preview.py                  # 预览实时调参测试
+python tools/test_fidelity.py                 # 预览与最终输出的保真度验证
+python tools/test_pagerange.py                 # 页码范围解析回归测试
+python tools/make_showcase.py                 # 生成效果对比图
 ```
 
 ### 关于预览保真度
@@ -247,3 +285,13 @@ python tools/make_compare.py                    # 生成对比图
   （模糊、噪点强度、倾斜角度已做到一致）。预览窗口内已标注说明。
 - 极少数 PDF 的 `/Rotate` 不会被渲染矩阵带出，代码里做了宽高方向的防呆补正。
 - 加密 PDF 只支持空密码解锁。
+
+---
+
+## 反馈
+
+遇到问题或效果不符合预期，欢迎提 Issue，附上 `logs/` 里的崩溃日志或自检报告会大幅加快定位。
+
+## 许可
+
+本仓库暂未添加开源许可证文件。若需二次分发或商用，请先与作者确认授权。

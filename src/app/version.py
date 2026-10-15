@@ -10,8 +10,8 @@ APP_NAME = "PDF 打印扫描模拟器"          # 显示名称（中文）
 APP_NAME_EN = "PdfPrintScanSimulator"      # 英文标识（用于目录名、文件名）
 APP_ID = "com.local.pdfprint.scansim"      # 应用唯一标识
 
-__version__ = "1.0.0"
-BUILD_DATE = "2026-10-14"
+__version__ = "1.0.1"
+BUILD_DATE = "2026-10-15"
 AUTHOR = "PdfPrint"
 
 # ---- 语义化版本拆分（供 exe 文件属性 / 比较使用）----

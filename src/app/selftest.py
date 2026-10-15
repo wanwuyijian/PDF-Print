@@ -21,6 +21,7 @@ import datetime as _dt
 import platform
 import sys
 import tempfile
+import time as _time
 import traceback
 from pathlib import Path
 
@@ -259,7 +260,48 @@ def run_selftest() -> tuple[bool, str]:
         assert first == second, "同一种子两次输出不一致"
         c.detail = f"{len(first)} 字节，两次完全一致"
 
-    # ================= 4. 崩溃日志链路 =================
+    # ================= 4. 页码范围解析（v1.0.0 崩溃回归点）=================
+    with _check("页码范围：语法校验不分配内存") as c:
+        # v1.0.0 在这里用 parse_page_range(spec, 10**9) 做校验，
+        # spec="all" 时会 list(range(10**9)) → 卡死 70 秒后 MemoryError
+        # 注意：局部计时变量不要叫 t0 —— 函数开头的 t0 是 _dt.datetime.now()
+        _pt = _time.perf_counter()
+        ok_all, _ = engine.validate_page_range("all")
+        dt = _time.perf_counter() - _pt
+        assert ok_all, "'all' 应被判定为合法"
+        assert dt < 0.05, f"校验耗时 {dt:.3f}s，说明仍在做无谓的展开"
+        c.detail = f"validate_page_range('all') {dt * 1000:.3f} ms"
+
+    with _check("页码范围：荒谬 total 不会撑爆内存") as c:
+        _pt = _time.perf_counter()
+        r = engine.parse_page_range("all", 10 ** 9)
+        dt = _time.perf_counter() - _pt
+        assert len(r) <= engine.MAX_PAGE_RANGE, f"返回了 {len(r)} 项"
+        assert dt < 1.0, f"耗时 {dt:.2f}s"
+        c.detail = f"'all' + total=10^9 → {len(r)} 项，{dt * 1000:.1f} ms（已截断）"
+
+    with _check("页码范围：解析结果正确（1 基 → 0 基）") as c:
+        cases = [("all", 3, [0, 1, 2]),
+                 ("1-3", 5, [0, 1, 2]),
+                 ("3-1", 5, [0, 1, 2]),
+                 ("1-99", 5, [0, 1, 2, 3, 4]),
+                 ("1-3,5,8-10", 10, [0, 1, 2, 4, 7, 8, 9]),
+                 ("1-3，5", 10, [0, 1, 2, 4]),
+                 ("9", 5, []),
+                 ("0", 5, [])]
+        for spec, total, expect in cases:
+            got = engine.parse_page_range(spec, total)
+            assert got == expect, f"{spec!r},{total} → {got}，应为 {expect}"
+        c.detail = f"{len(cases)} 组用例全部正确"
+
+    with _check("页码范围：非法输入被拒绝并提示") as c:
+        for bad in ("abc", "1-x", "1--3", "1.5", "1_0", "第3页"):
+            ok, why = engine.validate_page_range(bad)
+            assert not ok, f"{bad!r} 竟被判定为合法"
+            assert why, f"{bad!r} 拒绝时没有给出原因"
+        c.detail = "abc / 1-x / 1--3 / 1.5 / 1_0 / 第3页 均被拒绝并说明原因"
+
+    # ================= 5. 崩溃日志链路 =================
     with _check("崩溃日志写入") as c:
         try:
             raise RuntimeError("selftest 故意抛出的异常（用于验证崩溃记录链路）")

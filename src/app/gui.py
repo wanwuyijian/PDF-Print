@@ -857,11 +857,43 @@ class App(tk.Tk):
             return
 
         job = self.collect_job()
-        if engine.parse_page_range(job.pages, 10 ** 9) == []:
-            messagebox.showwarning("页码范围无效",
-                                   f"「{job.pages}」解析不出任何页码。\n"
-                                   "请使用 all 或 1-3,5,8-10 这样的格式。")
+
+        # ① 页码范围**语法**校验。用 validate_page_range（只解析不展开），
+        #    绝不能用 parse_page_range(spec, 假 total) 来校验 —— 那会真的去分配
+        #    一个巨大的列表，见 engine.validate_page_range 的注释。
+        ok, why = engine.validate_page_range(job.pages)
+        if not ok:
+            messagebox.showwarning(
+                "页码范围无效",
+                f"{why}\n\n"
+                f"当前填的是：{job.pages}\n\n"
+                "正确写法：\n"
+                "· 留空 或 all  → 全部页面\n"
+                "· 1-3,5,8-10    → 第1~3页、第5页、第8~10页（从 1 开始计数）")
             return
+
+        # ② 范围与文件实际页码是否有交集 —— 提前告知，别等跑完才发现"处理了 0 页"
+        spec = job.pages.strip().lower()
+        if spec not in ("", "all", "全部", "*"):
+            def _hits_any() -> bool:
+                for f in self.files:
+                    n = self.page_counts.get(str(f), 0)
+                    if n > 0 and engine.parse_page_range(job.pages, n):
+                        return True
+                return False
+
+            if not _hits_any():
+                detail = "\n".join(
+                    f"· {Path(f).name}：共 {self.page_counts.get(str(f), 0)} 页"
+                    for f in self.files[:5])
+                if len(self.files) > 5:
+                    detail += f"\n… 另有 {len(self.files) - 5} 个文件"
+                messagebox.showwarning(
+                    "页码范围与文件页数不匹配",
+                    f"页码范围「{job.pages}」在所选文件里一页都取不到。\n\n"
+                    f"{detail}\n\n"
+                    "请调整页码范围，或把该字段留空 / 填 all 表示全部页面。")
+                return
 
         outdir = Path(job.output_params.out_dir) if job.output_params.out_dir \
             else default_output_dir()

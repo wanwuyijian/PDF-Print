@@ -60,11 +60,78 @@ class Cancelled(Exception):
 # --------------------------------------------------------------------------- #
 # 页码解析
 # --------------------------------------------------------------------------- #
-def parse_page_range(spec: str, total: int) -> list[int]:
+# 单次最多展开的页码数上限。
+# 正常 PDF 远小于此（能到十万页的 PDF 基本不存在），
+# 设上限是为了防止调用方传入不合理的 total 时把内存撑爆。
+MAX_PAGE_RANGE = 100_000
+
+
+def _is_int(text: str) -> bool:
+    """严格判断是不是十进制整数（排除 int() 会接受的 '1_0'、全角数字等）"""
+    s = (text or "").strip()
+    body = s[1:] if s[:1] in ("+", "-") else s
+    return bool(body) and body.isdigit() and body.isascii()
+
+
+def _is_page_num(text: str) -> bool:
+    """页码必须是**不带符号**的正整数数字串。
+
+    区间端点尤其要严格：否则 '1--3' 会被 partition('-') 切成 '1' 和 '-3'，
+    悄悄当成区间 1-3 处理掉，用户以为自己写错了却没收到任何提示。
     """
-    "1-3,5,8-10" -> [0,1,2,4,7,8,9]（0 基，去重升序）
-    "all" / "" / "全部" -> 全部页码
+    s = (text or "").strip()
+    return bool(s) and s.isdigit() and s.isascii()
+
+
+def validate_page_range(spec: str) -> tuple[bool, str]:
     """
+    **只校验页码范围的语法，不展开任何页码。**
+
+    为什么必须单独写一个校验函数：
+        早期版本为了校验格式，调用了 parse_page_range(spec, 10 ** 9)，
+        想用 10 亿当"总页数不重要"的哨兵值。但 parse_page_range 在 spec="all"
+        时会执行 list(range(total)) —— 于是真的要创建一个十亿元素的列表，
+        先卡死约 70 秒，最后抛 MemoryError。
+        而 "all" 恰好是界面上「页码范围」输入框的**默认值**，
+        也就是说**所有用户第一次点「开始处理」都会崩溃**。
+
+    这个函数是纯 O(字符串长度) 的，与 total 无关，可以安全地用来做格式校验。
+    """
+    s = (spec or "").strip().lower()
+    if s in ("", "all", "全部", "*"):
+        return True, ""
+
+    bad: list[str] = []
+    for chunk in s.replace("，", ",").split(","):
+        c = chunk.strip()
+        if not c:
+            continue
+        if "-" in c:
+            a, _, b = c.partition("-")
+            if not (_is_page_num(a) and _is_page_num(b)):
+                bad.append(c)
+        elif not _is_page_num(c):
+            bad.append(c)
+
+    if bad:
+        shown = "、".join(bad[:5]) + ("…" if len(bad) > 5 else "")
+        return False, f"以下片段无法识别：{shown}"
+    return True, ""
+
+
+def parse_page_range(spec: str, total: int, limit: int = MAX_PAGE_RANGE) -> list[int]:
+    """
+    解析页码范围为 0 基页码列表。
+
+    :param spec:  "all" / "" 表示全部；也支持 "1-3,5,8-10"
+    :param total: 总页数
+    :param limit: 最多展开多少页 —— 防御性上限，防止 total 传错导致内存爆炸
+    """
+    try:
+        total = max(0, min(int(total), limit))
+    except (TypeError, ValueError):
+        total = 0
+
     spec = (spec or "").strip().lower()
     if spec in ("", "all", "全部", "*"):
         return list(range(total))
@@ -76,19 +143,24 @@ def parse_page_range(spec: str, total: int) -> list[int]:
             continue
         if "-" in chunk:
             a, _, b = chunk.partition("-")
-            try:
-                start, end = int(a), int(b)
-            except ValueError:
+            if not (_is_page_num(a) and _is_page_num(b)):
                 continue
+            start, end = int(a), int(b)
             if start > end:
                 start, end = end, start
-            for p in range(max(1, start), min(total, end) + 1):
-                picked.add(p - 1)
-        else:
-            try:
-                p = int(chunk)
-            except ValueError:
+            start = max(1, start)
+            end = min(total, end)
+            if end < start:
                 continue
+            if end - start + 1 > limit:      # 防御：超长区间只取前 limit 页
+                end = start + limit - 1
+                log.warning("页码区间 %s 过长，已截断为前 %d 页", chunk, limit)
+            # 界面是 1 基页码，内部统一存 0 基：闭区间 [start, end] -> [start-1, end-1]
+            picked.update(range(start - 1, end))
+        else:
+            if not _is_page_num(chunk):
+                continue
+            p = int(chunk)
             if 1 <= p <= total:
                 picked.add(p - 1)
     return sorted(picked)
