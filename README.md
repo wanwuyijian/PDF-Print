@@ -13,7 +13,12 @@
 
 ## 📥 下载
 
-前往 **[Releases 页面](https://github.com/wanwuyijian/PDF-Print/releases)** 下载 `PDF 打印扫描模拟器_v1.0.1.exe`。
+**最新版：[`PDF-Print-Simulator_v1.0.1.exe`](https://github.com/wanwuyijian/PDF-Print/releases/download/v1.0.1/PDF-Print-Simulator_v1.0.1.exe)**（48.4 MB，单文件免安装）
+
+或前往 **[Releases 页面](https://github.com/wanwuyijian/PDF-Print/releases)** 查看全部版本。
+
+> 附件名用英文是因为 GitHub 会自动剔除 Release 附件名里的非 ASCII 字符，
+> 中文名上传后会被洗成 `PDF._v1.0.1.exe`。程序本身的中文名和界面不受影响。
 
 <details>
 <summary>不想下载 exe？自己打包（约 1 分钟）</summary>
