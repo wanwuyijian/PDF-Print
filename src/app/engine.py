@@ -260,11 +260,18 @@ def compose_sheet(content: Image.Image,
 # --------------------------------------------------------------------------- #
 # 编码
 # --------------------------------------------------------------------------- #
-def encode_image(gray: np.ndarray, use_jpeg: bool, quality: int) -> tuple[bytes, str]:
-    """灰度数组 → 编码字节 + 扩展名"""
-    img = Image.fromarray(gray, mode="L")
+def encode_image(arr: np.ndarray, use_jpeg: bool, quality: int,
+                 color: bool = False) -> tuple[bytes, str]:
+    """扫描件数组 → 编码字节 + 扩展名（支持灰度 (H,W) 与彩色 (H,W,3)）"""
+    img = Image.fromarray(arr, mode="RGB" if (color or arr.ndim == 3) else "L")
     buf = BytesIO()
     if use_jpeg:
+        if img.mode == "RGB":
+            # 彩色扫描件走 JPEG 时保留全色度（subsampling=0 = 4:4:4），
+            # 默认的 4:2:0 会把红黑边缘糊掉，扫描件的细笔画一眼就能看出来
+            img.save(buf, format="JPEG", quality=int(np.clip(quality, 5, 100)),
+                     optimize=True, subsampling=0)
+            return buf.getvalue(), ".jpg"
         img.save(buf, format="JPEG", quality=int(np.clip(quality, 5, 100)),
                  optimize=True, subsampling=0)
         return buf.getvalue(), ".jpg"
@@ -272,19 +279,26 @@ def encode_image(gray: np.ndarray, use_jpeg: bool, quality: int) -> tuple[bytes,
     return buf.getvalue(), ".png"
 
 
-def resample_gray(gray: np.ndarray, scale: float) -> np.ndarray:
-    """按比例重采样扫描件（降采样前轻微模糊，模拟扫描采样抗锯齿）"""
+def resample_image(arr: np.ndarray, scale: float) -> np.ndarray:
+    """按比例重采样扫描件（降采样前轻微模糊，模拟扫描采样抗锯齿）。
+
+    灰度 (H,W) 与彩色 (H,W,3) 通用。
+    """
     if abs(scale - 1.0) < 0.004:
-        return gray
-    h, w = gray.shape[:2]
+        return arr
+    h, w = arr.shape[:2]
     nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-    img = Image.fromarray(gray, mode="L")
+    img = Image.fromarray(arr, mode="RGB" if arr.ndim == 3 else "L")
     if scale < 1.0:
         img = img.filter(ImageFilter_Gaussian(0.45))
         img = img.resize((nw, nh), Image.LANCZOS)
     else:
         img = img.resize((nw, nh), Image.BICUBIC)
     return np.asarray(img, dtype=np.uint8)
+
+
+# 兼容旧名字（早期只有灰度版本）
+resample_gray = resample_image
 
 
 def ImageFilter_Gaussian(radius: float):
@@ -465,20 +479,20 @@ def process_pdf(src_path: str | Path,
             _tick(done, total,
                   f"第 {order + 1}/{total} 页：模拟{pp.mode_label.split('（')[0]}…")
             tp = time.perf_counter()
-            gray = effects.simulate(sheet, pp, sp, rng,
+            scanned = effects.simulate(sheet, pp, sp, rng,
                                     log_hook=lambda m: log.debug("%s", m.strip()))
             del sheet
             log.info("第 %d 页 打印+扫描模拟完成 %.2fs", pidx + 1, time.perf_counter() - tp)
 
             # 扫描分辨率重采样
             if op.out_dpi != op.render_dpi:
-                gray = resample_gray(gray, op.out_dpi / float(op.render_dpi))
+                scanned = resample_image(scanned, op.out_dpi / float(op.render_dpi))
 
             _tick(done, total, f"第 {order + 1}/{total} 页：编码输出…")
 
             # 二值/无损场景用 PNG，避免 JPEG 在纯黑白图上产生振铃
             use_jpeg = bool(op.jpeg_in_pdf) and not sp.is_binary and op.out_format != "png"
-            data, _ext = encode_image(gray, use_jpeg, sp.jpeg_quality)
+            data, _ext = encode_image(scanned, use_jpeg, sp.jpeg_quality)
 
             if want_pdf and out_pdf is not None:
                 pw_pt = paper.mm_to_pt(sheet_w_mm)
@@ -493,7 +507,7 @@ def process_pdf(src_path: str | Path,
                 outputs.append(str(ipath))
                 log.info("第 %d 页 图片已保存: %s", pidx + 1, ipath.name)
 
-            del gray, data
+            del scanned, data
             done += 1
 
         if want_pdf and out_pdf is not None:
@@ -591,9 +605,13 @@ class PreviewSession:
             # 不做补偿的话预览会比真实输出「糊好几倍」，调参就失去意义。
             self.dpi_scale = dpi / float(op.render_dpi)
 
-            # 打印阶段：只算一次
+            # 打印阶段：只算一次。
+            # 这里刻意缓存**三通道反射率**而不是灰度 —— 预览窗口里用户可以
+            # 随时切换「灰度/二值/彩色」扫描模式，如果打印阶段就灰化了，
+            # 切到彩色也只会看到灰的（v1.0.3 之前预览只有黑白两色就是这个原因）。
+            # 灰化推迟到 apply_scan_effect 内部按 out_mode 决定。
             rng = np.random.default_rng(self.seed)
-            self.base_gray = effects.print_effect_grayscale(
+            self.base_rgb = effects.apply_print_effect(
                 sheet, job.print_params, rng, dpi_scale=self.dpi_scale)
             del sheet
 
@@ -605,27 +623,28 @@ class PreviewSession:
                 "dpi_scale": self.dpi_scale,
                 "sheet_mm": (sheet_w_mm, sheet_h_mm),
                 "src_mm": (src_w_mm, src_h_mm),
-                "px": self.base_gray.shape[:2],
+                "px": self.base_rgb.shape[:2],
             }
         finally:
             doc.close()
 
     def rescan(self, scan_params: ScanParams, scale: float = 1.0) -> np.ndarray:
         """
-        仅重跑扫描阶段，返回 uint8 灰度图。
+        仅重跑扫描阶段。
 
         :param scale: <1 时把缓存的打印件先降采样再扫描，用于拖动滑块过程中的
                       **快速预览**（分辨率降一档，速度提升约 2.5 倍）。
                       dpi_scale 会同步乘以 scale，所以模糊/云斑的物理尺寸依然正确。
+        :return: uint8。彩色扫描 → (H,W,3)；灰度/二值 → (H,W)
         """
-        base = self.base_gray
+        base = self.base_rgb
         dpi_scale = getattr(self, "dpi_scale", 1.0)
 
         if 0.15 < scale < 0.995:
             h, w = base.shape[:2]
             nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
             u8 = np.clip(base * 255.0, 0, 255).astype(np.uint8)
-            small = Image.fromarray(u8, mode="L").resize((nw, nh), Image.BILINEAR)
+            small = Image.fromarray(u8, mode="RGB").resize((nw, nh), Image.BILINEAR)
             base = np.asarray(small, dtype=np.float32) / 255.0
             dpi_scale *= scale
 

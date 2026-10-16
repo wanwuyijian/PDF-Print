@@ -84,3 +84,48 @@ for (title, _), im in zip(panels, imgs):
 d.text((GAP, 12), "", fill=0, font=font_s)
 canvas.save(OUT)
 print("OK ->", OUT, canvas.size)
+
+
+# --------------------------------------------------------------------------- #
+# 扫描色彩对比（v1.0.4）：同一页彩色内容，三种扫描模式
+# --------------------------------------------------------------------------- #
+def render_scanmode(mode: str, engine_mode: str = "color_laser"):
+    """mode: gray / binary / color"""
+    sp = ScanParams(out_mode=mode)
+    sp.skew_deg = 0.0
+    job = RenderJob(
+        print_params=PrintParams(mode=engine_mode),
+        scan_params=sp,
+        layout_params=LayoutParams(paper="A4", margin_mm=8),
+        output_params=OutputParams(render_dpi=DPI, out_dpi=DPI))
+    s = engine.PreviewSession(SRC, job, page_index=PAGE, max_side=10 ** 6)
+    return s.rescan(sp)
+
+
+OUT2 = ROOT / "test" / "cmp" / "扫描色彩对比.png"
+
+def fit_rgb(a, w):
+    im = Image.fromarray(a, "RGB" if a.ndim == 3 else "L").convert("RGB")
+    h = int(im.height * w / im.width)
+    return im.resize((w, h), Image.LANCZOS)
+
+
+panels2 = [("① 原始彩色 PDF", Image.fromarray(render(None), "L").convert("RGB")),
+           ("② 灰度扫描（默认）", fit_rgb(render_scanmode("gray"), MAX_W)),
+           ("③ 黑白二值扫描", fit_rgb(render_scanmode("binary"), MAX_W)),
+           ("④ 彩色扫描（新增）", fit_rgb(render_scanmode("color"), MAX_W))]
+
+imgs2 = [(t, fit_rgb(np.asarray(im, np.uint8), MAX_W) if im.width != MAX_W else im)
+         for t, im in panels2]
+H2 = max(i.height for _, i in imgs2)
+canvas2 = Image.new("RGB", (W, H2 + label_h + GAP), 255)
+d2 = ImageDraw.Draw(canvas2)
+x = GAP
+for title, im in imgs2:
+    canvas2.paste(im, (x, label_h))
+    d2.rectangle([x - 1, label_h - 1, x + im.width, label_h + im.height], outline=150)
+    tw = d2.textlength(title, font=font_s)
+    d2.text((x + (im.width - tw) / 2, 12), title, fill=0, font=font_s)
+    x += MAX_W + GAP
+canvas2.save(OUT2)
+print("OK ->", OUT2, canvas2.size)

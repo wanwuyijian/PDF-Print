@@ -81,14 +81,34 @@ class ScanParams:
     vignette: float = 0.25
     # JPEG 压缩质量（1~100），越低数码味越重、块效应越明显
     jpeg_quality: int = 78
-    # 输出模式：gray=灰度扫描；binary=黑白二值扫描（纯黑白，字口硬化）
+    # 输出模式：
+    #   gray   = 灰度扫描（扫描仪按亮度采样，彩色内容灰化后深浅不同）
+    #   binary = 黑白二值扫描（纯黑白，字口硬化）
+    #   color  = 彩色扫描（保留彩色，输出 RGB）
     out_mode: str = "gray"
     # 二值化阈值（out_mode=binary 时生效）
     binary_threshold: int = 158
 
+    # ---- 以下三项仅在 out_mode=color（彩色扫描）时生效 ----
+    # 纸张与光源偏暖程度 0~1。
+    # 真实白纸经彩色扫描后**不会是中性灰**：纸张本身略带暖黄，
+    # 加上扫描仪灯管色温偏暖，纸底通常 R>G>B。取 0 才是理想中性白。
+    paper_warmth: float = 0.30
+    # 扫描仪白平衡偏差 0~1。
+    # CCD/CIS 三个通道的增益不可能完全一致，整幅会偏向青/品红/黄某一侧。
+    # 这是彩色扫描件「一眼假」与否的关键 —— 纯中性色的扫描件反而不像真的。
+    color_cast: float = 0.18
+    # 色彩饱和度增益。扫描仪自动校色后颜色通常略艳（或略闷），
+    # 1.0 = 原样，>1 更艳，<1 更灰。
+    sat_boost: float = 1.05
+
     @property
     def is_binary(self) -> bool:
         return self.out_mode == "binary"
+
+    @property
+    def is_color(self) -> bool:
+        return self.out_mode == "color"
 
 
 # =========================================================================== #
@@ -244,6 +264,37 @@ BUILTIN_PRESETS: dict[str, dict] = {
                          contrast=1.06, brightness=1.00, vignette=0.28,
                          jpeg_quality=76, out_mode="gray"),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
+    ),
+    # ---- 彩色扫描（v1.0.4）----
+    "彩色打印→彩色扫描（推荐）": dict(
+        print_params=_mk_print(mode="color_laser", density=1.00, contrast=1.02,
+                               spread=0.55, grain=0.30, halftone=0.20,
+                               misregister=0.55, tac_limit=280),
+        scan_params=dict(paper_base=245, paper_cloud=0.40, noise=0.34, blur=0.55,
+                         contrast=1.06, brightness=1.00, vignette=0.28,
+                         jpeg_quality=82, out_mode="color",
+                         paper_warmth=0.30, color_cast=0.18, sat_boost=1.05),
+        layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
+    ),
+    "彩色喷墨→彩色扫描（鲜艳）": dict(
+        print_params=_mk_print(mode="color_inkjet", density=1.05, contrast=1.00,
+                               spread=0.62, grain=0.24, halftone=0.14,
+                               misregister=0.35, tac_limit=270),
+        scan_params=dict(paper_base=246, paper_cloud=0.35, noise=0.28, blur=0.48,
+                         contrast=1.04, brightness=1.00, vignette=0.22,
+                         jpeg_quality=86, out_mode="color",
+                         paper_warmth=0.24, color_cast=0.12, sat_boost=1.14),
+        layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
+    ),
+    "彩色扫描·老旧褪色": dict(
+        print_params=_mk_print(mode="color_laser", density=0.94, contrast=1.00,
+                               spread=0.72, grain=0.38, halftone=0.24,
+                               misregister=0.70, tac_limit=290),
+        scan_params=dict(paper_base=237, paper_cloud=0.68, noise=0.48, blur=0.78,
+                         contrast=1.12, brightness=0.96, vignette=0.46,
+                         jpeg_quality=64, out_mode="color",
+                         paper_warmth=0.62, color_cast=0.34, sat_boost=0.88),
+        layout_params=dict(paper="A4", orientation="auto", margin_mm=10.0, scale_mode="fit"),
     ),
 }
 

@@ -37,7 +37,7 @@ def build(mode, blur, noise, skew, max_side, compensate=True):
         output_params=OutputParams(render_dpi=200, out_dpi=200))
     s = engine.PreviewSession(SRC, job, page_index=0, max_side=max_side)
     scale = s.dpi_scale if compensate else 1.0
-    img = effects.apply_scan_effect(s.base_gray, job.scan_params,
+    img = effects.apply_scan_effect(s.base_rgb, job.scan_params,
                                     np.random.default_rng(s.seed), dpi_scale=scale)
     return img, s
 

@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import engine, logsetup, paths
+from . import effects, engine, logsetup, paths
 from .config import (LayoutParams, OutputParams, PrintParams, RenderJob,
                      ScanParams)
 from .version import APP_NAME, __version__
@@ -376,7 +376,54 @@ def run_selftest() -> tuple[bool, str]:
         finally:
             _sh.rmtree(d, ignore_errors=True)
 
-    # ================= 6. 崩溃日志链路 =================
+    # ================= 6. 彩色扫描链路（v1.0.4 新增）=================
+    with _check("彩色扫描：输出确实是彩色而不是灰度") as c:
+        h, w = 90, 270
+        rgb = np.ones((h, w, 3), np.float32)
+        rgb[30:, 0:90] = (0.85, 0.15, 0.15)      # 红
+        rgb[30:, 90:180] = (0.15, 0.65, 0.25)    # 绿
+        rgb[30:, 180:270] = (0.15, 0.25, 0.80)   # 蓝
+
+        sp = ScanParams(out_mode="color")
+        sp.skew_deg = 0.0
+        out = effects.simulate(rgb, PrintParams(mode="color_laser"), sp,
+                               np.random.default_rng(11))
+        assert out.ndim == 3 and out.shape[2] == 3, f"彩色模式输出形状异常: {out.shape}"
+        px = [out[60, 45], out[60, 135], out[60, 225]]
+        chroma = [int(p.max()) - int(p.min()) for p in px]
+        assert min(chroma) > 60, f"三原色块彩度过低 {chroma}，彩色信息可能又被灰化了"
+        c.detail = f"红/绿/蓝块彩度 {chroma}（>60 视为真的保留彩色）"
+
+    with _check("灰度/二值模式仍然只出灰度（无回归）") as c:
+        rgb = np.ones((60, 60, 3), np.float32)
+        rgb[20:, :] = (0.9, 0.1, 0.1)
+        res = []
+        for mode in ("gray", "binary"):
+            sp = ScanParams(out_mode=mode)
+            sp.skew_deg = 0.0
+            o = effects.simulate(rgb, PrintParams(mode="color_laser"), sp,
+                                 np.random.default_rng(3))
+            assert o.ndim == 2, f"{mode} 模式输出了 {o.ndim} 维，应为灰度"
+            res.append(mode)
+        c.detail = "gray / binary 均输出 (H,W) 单通道"
+
+    with _check("彩色扫描：黑白打印机应产出接近中性灰") as c:
+        # 黑白激光只有灰墨 → 即便用彩色扫描，彩度也应很低。
+        # 若这里彩度很高，说明打印阶段的灰度约束丢了，属于算法错误。
+        h, w = 60, 60
+        rgb = np.ones((h, w, 3), np.float32)
+        rgb[20:, :] = (0.85, 0.15, 0.15)
+        sp = ScanParams(out_mode="color")
+        sp.skew_deg = 0.0
+        out = effects.simulate(rgb, PrintParams(mode="mono_laser"), sp,
+                               np.random.default_rng(5))
+        assert out.ndim == 3, "彩色扫描应输出三通道"
+        px = out[40, 30]
+        chroma = int(px.max()) - int(px.min())
+        assert chroma < 25, f"黑白打印机的彩色扫描彩度过高({chroma})，说明灰墨约束失效"
+        c.detail = f"彩度 {chroma}（应 <25，仅来自纸张暖调与白平衡）"
+
+    # ================= 7. 崩溃日志链路 =================
     with _check("崩溃日志写入") as c:
         try:
             raise RuntimeError("selftest 故意抛出的异常（用于验证崩溃记录链路）")

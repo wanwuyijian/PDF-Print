@@ -1,9 +1,9 @@
 # PDF 打印扫描模拟器
 
-[![版本](https://img.shields.io/badge/版本-v1.0.3-3a7bd8)](https://github.com/wanwuyijian/PDF-Print/releases)
+[![版本](https://img.shields.io/badge/版本-v1.0.4-3a7bd8)](https://github.com/wanwuyijian/PDF-Print/releases)
 [![平台](https://img.shields.io/badge/平台-Windows%20|%20Linux%20|%20macOS-0075c4)]()
 [![Python](https://img.shields.io/badge/Python-3.10+-3776ab)](https://www.python.org/)
-[![自检](https://img.shields.io/badge/自检-32%2F32%20通过-4c1)](https://github.com/wanwuyijian/PDF-Print)
+[![自检](https://img.shields.io/badge/自检-35%2F35%20通过-4c1)](https://github.com/wanwuyijian/PDF-Print)
 
 把 PDF 电子文档模拟成 **「打印机打印过、再被扫描仪扫成黑白件」** 的样子。
 
@@ -13,12 +13,12 @@
 
 ## 📥 下载
 
-**最新版：[`PDF-Print-Simulator_v1.0.3.exe`](https://github.com/wanwuyijian/PDF-Print/releases/download/v1.0.3/PDF-Print-Simulator_v1.0.3.exe)**（48.4 MB，单文件免安装）
+**最新版：[`PDF-Print-Simulator_v1.0.4.exe`](https://github.com/wanwuyijian/PDF-Print/releases/download/v1.0.4/PDF-Print-Simulator_v1.0.4.exe)**（48.4 MB，单文件免安装）
 
 或前往 **[Releases 页面](https://github.com/wanwuyijian/PDF-Print/releases)** 查看全部版本。
 
 > 附件名用英文是因为 GitHub 会自动剔除 Release 附件名里的非 ASCII 字符，
-> 中文名上传后会被洗成 `PDF._v1.0.3.exe`。程序本身的中文名和界面不受影响。
+> 中文名上传后会被洗成 `PDF._v1.0.4.exe`。程序本身的中文名和界面不受影响。
 
 <details>
 <summary>不想下载 exe？自己打包（约 1 分钟）</summary>
@@ -59,7 +59,7 @@ python tools/build.py
 ### 出问题时先跑自检
 
 ```bash
-PDF打印扫描模拟器_v1.0.3.exe --selftest
+PDF打印扫描模拟器_v1.0.4.exe --selftest
 ```
 
 跑完弹窗给结论，并生成报告文件到 `logs/selftest_*.txt`，用于快速区分「环境问题」与「代码问题」。
@@ -101,6 +101,25 @@ PDF打印扫描模拟器_v1.0.3.exe --selftest
 - **彩色激光**：同样的红块明显更浅（色料不同），黑块是灰的 —— 因为彩色机的黑由 CMY 叠印而成
 - **彩色喷墨**：墨量更足但暗部发闷，整体偏青
 
+## 三种扫描色彩
+
+同一页彩色内容，三种扫描模式的结果：
+
+![扫描色彩对比](docs/扫描色彩对比.png)
+
+| 模式 | 说明 |
+|---|---|
+| **灰度扫描** | 按亮度采样，红字偏浅、黄字几乎看不见。最接近真实黑白扫描件 |
+| **黑白二值** | 只有纯黑纯白，字口硬化，文件体积最小 |
+| **彩色扫描** | 保留颜色输出 RGB。配合彩色打印机使用 |
+
+彩色扫描不是把灰度图染个色，而是整条链路保持三通道：纸张底色叠加光谱色调、
+三通道独立传感器噪点、按通道的边缘暗角、扫描仪白平衡偏差与饱和度增益。
+
+> 一个容易被忽略的点：**黑白打印机 + 彩色扫描，结果依然接近中性灰** ——
+> 因为黑白机只有灰墨，彩色扫描仪也扫不出不存在的颜色。
+> 如果这时画面还是彩色的，那才是错的。
+
 ## 界面
 
 主界面：文件列表 + 三个参数页（打印效果 / 扫描效果 / 版式与输出）+ 实时预览入口。
@@ -113,6 +132,7 @@ PDF打印扫描模拟器_v1.0.3.exe --selftest
 ![版式与输出](docs/版式与输出.png)
 
 预览窗口：模糊度、噪点、倾斜度三个核心滑块拖动即时生效，调好后一键回填主界面。
+「扫描色彩」可在预览里直接切换，立即看到灰度 / 二值 / 彩色的区别。
 
 ![预览窗口](docs/预览窗口.png)
 
@@ -124,14 +144,15 @@ PDF打印扫描模拟器_v1.0.3.exe --selftest
 |---|---|---|
 | 1 | 黑白打印机打印 → 黑白扫描 | 黑白激光引擎（单色碳粉），黑字真黑、字口锐利 |
 | 2 | 彩色打印机打印 → 黑白扫描 | 彩色激光（CMYK 四色叠印）、彩色喷墨两个引擎 |
-| 3 | 可设输出纸张尺寸 | 12 种标准纸 + 自定义 + 保持原页面尺寸 |
-| 4 | 效果预览实时调参 | 模糊度 / 噪点 / 倾斜度拖动即生效，可回填主界面 |
-| 5 | **指定输出文件路径** | 输出目录 + 输出文件名自由组合，「另存为…」一键指定；同名自动加序号不覆盖 |
-| 6 | 批量处理 | 一次多选 PDF，后台线程处理，可随时取消 |
-| 7 | 版本管理 | 版本号单一来源，exe 属性自动同步 |
-| 8 | 日志与崩溃记录 | 运行日志 + 独立崩溃快照（含全部线程栈与崩溃现场参数）+ 环境体检报告 |
-| 9 | 自检模式 | `--selftest` 32 项检查，一条命令定位问题 |
-| 10 | 跨机直接可用 | 单文件 exe 复制到任意 Windows 10/11 即可运行，无需安装、无需 Python |
+| 3 | **彩色打印机打印 → 彩色扫描** | 保留颜色输出 RGB，含纸张暖调 / 白平衡偏差 / 饱和度增益 |
+| 4 | 可设输出纸张尺寸 | 12 种标准纸 + 自定义 + 保持原页面尺寸 |
+| 5 | 效果预览实时调参 | 模糊度 / 噪点 / 倾斜度拖动即生效，色彩模式可即时切换 |
+| 6 | **指定输出文件路径** | 输出目录 + 输出文件名自由组合，「另存为…」一键指定；同名自动加序号不覆盖 |
+| 7 | 批量处理 | 一次多选 PDF，后台线程处理，可随时取消 |
+| 8 | 版本管理 | 版本号单一来源，exe 属性自动同步 |
+| 9 | 日志与崩溃记录 | 运行日志 + 独立崩溃快照（含全部线程栈与崩溃现场参数）+ 环境体检报告 |
+| 10 | 自检模式 | `--selftest` 35 项检查，一条命令定位问题 |
+| 11 | 跨机直接可用 | 单文件 exe 复制到任意 Windows 10/11 即可运行，无需安装、无需 Python |
 
 支持的纸张：`A3` `A4` `A5` `A6` `B4` `B5` `16开` `32开` `Letter` `Legal` `54×86mm` `38×26mm` `自定义` `保持原尺寸`
 
@@ -209,8 +230,8 @@ PDF打印扫描模拟器_v1.0.3.exe --selftest
 版本号只在一处定义：`src/app/version.py`
 
 ```python
-__version__ = "1.0.3"
-BUILD_DATE  = "2026-10-15"
+__version__ = "1.0.4"
+BUILD_DATE  = "2026-10-16"
 ```
 
 改动后重新打包，exe 会自动带上正确的文件版本、产品版本与中文名：
@@ -220,7 +241,7 @@ python tools/build.py            # 正式构建（无控制台窗口）
 python tools/build.py --debug    # 保留控制台窗口，方便看报错
 ```
 
-产物：`dist/PDF打印扫描模拟器_v1.0.3.exe`（单文件，免安装）
+产物：`dist/PDF打印扫描模拟器_v1.0.4.exe`（单文件，免安装）
 
 版本变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 

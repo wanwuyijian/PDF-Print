@@ -27,6 +27,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import numpy as np
 from PIL import Image
 
 from . import engine, logsetup, paper, paths
@@ -201,6 +202,9 @@ class App(tk.Tk):
         self.v_vignette = tk.DoubleVar(value=0.25)
         self.v_jpegq = tk.DoubleVar(value=78)
         self.v_scanmode = tk.StringVar(value="gray")
+        self.v_warmth = tk.DoubleVar(value=0.30)
+        self.v_cast = tk.DoubleVar(value=0.18)
+        self.v_sat = tk.DoubleVar(value=1.05)
         self.v_threshold = tk.DoubleVar(value=158)
 
         # --- 版式 / 输出 ---
@@ -473,14 +477,43 @@ class App(tk.Tk):
         box.grid(row=r, column=1, columnspan=2, sticky="ew")
         ttk.Radiobutton(box, text="灰度扫描（推荐）", value="gray",
                         variable=self.v_scanmode).pack(side="left")
-        ttk.Radiobutton(box, text="黑白二值扫描", value="binary",
+        ttk.Radiobutton(box, text="黑白二值", value="binary",
                         variable=self.v_scanmode).pack(side="left", padx=(PAD, 0))
-        _Tooltip(box, "灰度：保留灰阶，最接近真实扫描件。\n"
-                      "二值：只有纯黑与纯白，字口硬化，文件体积最小。")
+        ttk.Radiobutton(box, text="彩色扫描", value="color",
+                        variable=self.v_scanmode).pack(side="left", padx=(PAD, 0))
+        _Tooltip(box, "灰度：扫描仪按亮度采样，最接近真实黑白扫描件。\n"
+                      "二值：只有纯黑与纯白，字口硬化，文件体积最小。\n"
+                      "彩色：保留彩色，输出 RGB。配合彩色打印机使用效果最好 ——\n"
+                      "　　　黑白打印机只有灰墨，彩色扫描出来依然接近中性灰。")
         r += 1
-        self._add_slider(p, r, "二值化阈值", self.v_threshold, 60, 235, "{:.0f}",
-                         "仅二值模式生效。阈值越高，越多灰阶被判为黑。")
+        self.sl_threshold = self._add_slider(
+            p, r, "二值化阈值", self.v_threshold, 60, 235, "{:.0f}",
+            "仅二值模式生效。阈值越高，越多灰阶被判为黑。")
         r += 1
+
+        ttk.Separator(p, orient="horizontal").grid(
+            row=r, column=0, columnspan=3, sticky="ew", pady=PAD)
+        r += 1
+        ttk.Label(p, text="彩色扫描专用", anchor="w",
+                  style="Section.TLabel").grid(row=r, column=0, columnspan=3,
+                                               sticky="w", pady=(0, 2))
+        r += 1
+        self.sl_warmth = self._add_slider(
+            p, r, "纸张暖调", self.v_warmth, 0.0, 1.0, "{:.2f}",
+            "纸张与扫描灯管的偏暖程度。真实白纸彩色扫描后不会是中性灰，\n"
+            "纸底通常偏暖黄。0 = 理想中性白，0.3 ≈ 普通复印纸。")
+        r += 1
+        self.sl_cast = self._add_slider(
+            p, r, "白平衡偏差", self.v_cast, 0.0, 1.0, "{:.2f}",
+            "扫描仪三通道增益不一致造成的整体偏色（青/品红/黄随机一侧）。\n"
+            "完全为 0 会让彩色扫描件「太准」，反而不像真实扫描的。")
+        r += 1
+        self.sl_sat = self._add_slider(
+            p, r, "饱和度增益", self.v_sat, 0.5, 1.6, "{:.2f}",
+            "扫描仪自动校色的结果。1.0 = 原样，>1 更艳，<1 更灰。")
+        r += 1
+        self._on_scanmode_change()
+        self.v_scanmode.trace_add("write", lambda *a: self._on_scanmode_change())
 
     def _build_layout_tab(self, p):
         p.columnconfigure(1, weight=1)
@@ -638,6 +671,19 @@ class App(tk.Tk):
         return s
 
     # ---------------- 联动 ----------------
+    def _on_scanmode_change(self):
+        """按扫描模式灰掉无关参数，避免用户调了没反应以为程序坏了"""
+        mode = self.v_scanmode.get()
+        # 二值化阈值只对 binary 有意义
+        thr = getattr(self, "sl_threshold", None)
+        if thr is not None:
+            thr.scale.configure(state="normal" if mode == "binary" else "disabled")
+        # 三个彩色参数只对 color 有意义
+        for attr in ("sl_warmth", "sl_cast", "sl_sat"):
+            s = getattr(self, attr, None)
+            if s is not None:
+                s.scale.configure(state="normal" if mode == "color" else "disabled")
+
     def _on_skew_toggle(self):
         random_on = self.v_skew_random.get()
         self.sl_skew.scale.configure(state="disabled" if random_on else "normal")
@@ -895,6 +941,9 @@ class App(tk.Tk):
             jpeg_quality=int(round(self.v_jpegq.get())),
             out_mode=scan_mode,
             binary_threshold=int(round(self.v_threshold.get())),
+            paper_warmth=round(self.v_warmth.get(), 3),
+            color_cast=round(self.v_cast.get(), 3),
+            sat_boost=round(self.v_sat.get(), 3),
         )
 
         try:
@@ -1289,6 +1338,10 @@ class App(tk.Tk):
         self.v_jpegq.set(sp.jpeg_quality)
         self.v_scanmode.set(sp.out_mode)
         self.v_threshold.set(sp.binary_threshold)
+        self.v_warmth.set(sp.paper_warmth)
+        self.v_cast.set(sp.color_cast)
+        self.v_sat.set(sp.sat_boost)
+        self._on_scanmode_change()
 
         self.v_paper.set(paper.PAPER_LABELS.get(lp.paper, lp.paper))
         self.v_cw.set(str(lp.custom_w_mm))
@@ -1494,6 +1547,30 @@ class PreviewWindow(tk.Toplevel):
                        "颗粒与网点的纹理粗细受预览分辨率限制，会与最终输出略有差异。"
                   ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(PAD, 0)); r += 1
 
+        # ---- 扫描色彩（决定出的是灰的、黑白的还是彩色的）----
+        col = ttk.Labelframe(parent, text=" 扫描色彩 ", padding=PAD)
+        col.pack(fill="x", pady=(PAD, 0))
+        self.scanmode = tk.StringVar(value=self.sp.out_mode)
+        # 单选按钮放独立子框并横向排布；说明文字另起一行。
+        # 若把 side="left" 的按钮和说明标签直接 pack 进同一个容器，
+        # 标签会被挤到按钮右侧同一行，文字会和按钮重叠（窄面板下尤其明显）。
+        row = ttk.Frame(col)
+        row.pack(fill="x", anchor="w")
+        ttk.Radiobutton(row, text="灰度", value="gray",
+                        variable=self.scanmode,
+                        command=self._on_scanmode).pack(side="left")
+        ttk.Radiobutton(row, text="黑白二值", value="binary",
+                        variable=self.scanmode,
+                        command=self._on_scanmode).pack(side="left", padx=(PAD, 0))
+        ttk.Radiobutton(row, text="彩色", value="color",
+                        variable=self.scanmode,
+                        command=self._on_scanmode).pack(side="left", padx=(PAD, 0))
+        ttk.Label(col, style="Hint.TLabel", wraplength=280, justify="left",
+                  text="灰度/二值：扫描仪按亮度采样，彩色内容会变成不同的灰。\n"
+                       "彩色：保留颜色输出 RGB（打印引擎也需是彩色；\n"
+                       "黑白打印机的灰墨扫出来依然接近中性灰）。"
+                  ).pack(anchor="w", pady=(4, 0))
+
         # ---- 其他扫描参数 ----
         more = ttk.Labelframe(parent, text=" 其他扫描参数 ", padding=PAD)
         more.pack(fill="both", expand=True, pady=(PAD, 0))
@@ -1505,9 +1582,14 @@ class PreviewWindow(tk.Toplevel):
         self._p_slider(more, r, "brightness", "亮度", 0.85, 1.15, "{:.2f}"); r += 1
         self._p_slider(more, r, "vignette", "边缘暗角", 0.0, 1.0, "{:.2f}"); r += 1
         self._p_slider(more, r, "jpeg_quality", "JPEG 质量", 25, 100, "{:.0f}"); r += 1
-        self._p_slider(more, r, "binary_threshold", "二值化阈值", 60, 235, "{:.0f}"); r += 1
+        self.sl_p_thr = self._p_slider(more, r, "binary_threshold", "二值化阈值",
+                                       60, 235, "{:.0f}"); r += 1
+        self._p_slider(more, r, "paper_warmth", "纸张暖调", 0.0, 1.0, "{:.2f}"); r += 1
+        self._p_slider(more, r, "color_cast", "白平衡偏差", 0.0, 1.0, "{:.2f}"); r += 1
+        self._p_slider(more, r, "sat_boost", "饱和度增益", 0.5, 1.6, "{:.2f}"); r += 1
 
         self._on_skew_toggle()
+        self._on_scanmode()
 
         # ---- 按钮 ----
         btns = ttk.Frame(parent)
@@ -1565,6 +1647,19 @@ class PreviewWindow(tk.Toplevel):
     def _on_skew_toggle(self):
         self.sl_skew.scale.configure(state="disabled" if self.skew_random.get() else "normal")
         self._on_change("skew_deg")
+
+    def _on_scanmode(self):
+        """预览窗口里切换扫描色彩：立即把 out_mode 应用到参数并重渲染"""
+        mode = self.scanmode.get()
+        self.sp.out_mode = mode
+        thr = getattr(self, "sl_p_thr", None)
+        if thr is not None:
+            thr.scale.configure(state="normal" if mode == "binary" else "disabled")
+        for name in ("paper_warmth", "color_cast", "sat_boost"):
+            s = self._p_sliders.get(name)
+            if s is not None:
+                s.scale.configure(state="normal" if mode == "color" else "disabled")
+        self._on_change("out_mode")
 
     def _on_change(self, _field=None):
         if self._closing:
@@ -1674,7 +1769,7 @@ class PreviewWindow(tk.Toplevel):
                         f"纸张：{info['sheet_mm'][0]:.0f} × {info['sheet_mm'][1]:.0f} mm\n"
                         f"预览 {info['preview_dpi']:.0f} DPI  ·  正式输出 {info['render_dpi']} DPI\n"
                         f"输出：{self.job.output_params.out_dpi} DPI / "
-                        f"{'灰度' if self.job.scan_params.out_mode == 'gray' else '黑白二值'}"))
+                        f"{ {'gray': '灰度', 'binary': '黑白二值', 'color': '彩色'}.get(self.job.scan_params.out_mode, self.job.scan_params.out_mode) }"))
                     self._update_page_label()
                     self._request_render(quick=False)
                 else:
@@ -1696,9 +1791,14 @@ class PreviewWindow(tk.Toplevel):
             log.exception("预览轮询异常")
         self.after(40, self._poll)
 
-    def _paint(self, gray):
-        from PIL import ImageTk               # 延迟导入，加快启动
-        self._pil = Image.fromarray(gray, mode="L")
+    @staticmethod
+    def _to_pil(arr: np.ndarray) -> Image.Image:
+        """扫描件数组 → PIL 图像（灰度 (H,W) 或彩色 (H,W,3) 自动识别）"""
+        return Image.fromarray(arr, mode="RGB" if arr.ndim == 3 else "L")
+
+    def _paint(self, arr: np.ndarray):
+        self._pil = self._to_pil(arr)
+        self._is_color = arr.ndim == 3
         self._refresh_photo()
 
     def _refresh_photo(self):
@@ -1714,7 +1814,8 @@ class PreviewWindow(tk.Toplevel):
         self._photo = ImageTk.PhotoImage(disp)
         self.lbl_img.configure(image=self._photo, text="")
         quality = "快速预览" if getattr(self, "last_scale", 1.0) < 0.995 else "精修预览"
-        self._status(f"{quality}  ·  图像 {self._pil.width}×{self._pil.height} px  ·  "
+        kind = "彩色" if getattr(self, "_is_color", False) else "灰度"
+        self._status(f"{quality} · {kind}  ·  图像 {self._pil.width}×{self._pil.height} px  ·  "
                      f"显示 {disp.width}×{disp.height} px")
 
     def _on_resize(self, _evt=None):
@@ -1768,6 +1869,11 @@ class PreviewWindow(tk.Toplevel):
         a.v_vignette.set(self.sp.vignette)
         a.v_jpegq.set(self.sp.jpeg_quality)
         a.v_threshold.set(self.sp.binary_threshold)
+        a.v_scanmode.set(self.sp.out_mode)
+        a.v_warmth.set(self.sp.paper_warmth)
+        a.v_cast.set(self.sp.color_cast)
+        a.v_sat.set(self.sp.sat_boost)
+        a._on_scanmode_change()
 
         if self.skew_random.get():
             a.v_skew_random.set(True)
@@ -1802,7 +1908,9 @@ class PreviewWindow(tk.Toplevel):
         for name, s in self._p_sliders.items():
             s.var.set(getattr(self.sp, name))
             s.refresh()
+        self.scanmode.set(self.sp.out_mode)
         self._on_skew_toggle()
+        self._on_scanmode()
         self._status("已恢复为打开预览时的参数")
 
     def _save(self):
@@ -1816,7 +1924,8 @@ class PreviewWindow(tk.Toplevel):
         if not p:
             return
         try:
-            Image.fromarray(self.last_image, mode="L").save(p)
+            Image.fromarray(self.last_image,
+                            mode="RGB" if getattr(self.last_image, "ndim", 2) == 3 else "L").save(p)
             self._status(f"已保存：{p}")
             log.info("预览图已保存: %s", p)
         except Exception as e:

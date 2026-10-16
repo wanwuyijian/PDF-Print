@@ -109,6 +109,15 @@ def _highfreq_noise(h: int, w: int, rng: np.random.Generator) -> np.ndarray:
     return rng.normal(0.0, 1.0, (h, w)).astype(np.float32)
 
 
+def _highfreq_noise3(h: int, w: int, rng: np.random.Generator) -> np.ndarray:
+    """三通道各自独立的传感器噪点。
+
+    彩色扫描噪点**不能**三通道共用同一个噪声图 —— 那样只会改变亮度、不产生色噪，
+    看起来像加了灰蒙层。真实传感器的 RGB 读出电路是独立的，暗部会出现彩色噪点。
+    """
+    return np.stack([_highfreq_noise(h, w, rng) for _ in range(3)], axis=-1)
+
+
 def _tone_curve(x: np.ndarray, contrast: float, lift: float = 0.0,
                 pivot: float = 0.5) -> np.ndarray:
     """
@@ -259,10 +268,15 @@ def print_effect_grayscale(rgb: np.ndarray, pp: PrintParams,
 # 扫描效果
 # --------------------------------------------------------------------------- #
 def _paper_texture(h: int, w: int, sp: ScanParams,
-                   rng: np.random.Generator, dpi_scale: float = 1.0) -> np.ndarray:
+                   rng: np.random.Generator, dpi_scale: float = 1.0,
+                   channels: int = 1) -> np.ndarray:
     """
     纸张底色场（反射率平面，1.0 = 纸基标准白）。
     = 纸基灰度 × (1 + 低频云斑 + 高频纤维纹)
+
+    channels=3 时额外叠加**光谱色调**：纸张本身不是中性白，
+    加上扫描仪灯管色温偏暖，彩色扫描出来的纸底通常 R>G>B（偏暖黄）。
+    这是彩色扫描件真实感的关键之一 —— 纯中性灰的纸底一眼就是数字生成的。
     """
     base = np.clip(sp.paper_base, 150.0, 255.0) / 255.0
     tex = np.ones((h, w), dtype=np.float32) * base
@@ -282,6 +296,20 @@ def _paper_texture(h: int, w: int, sp: ScanParams,
 
     # 高频纤维纹理（极弱，只增加质感）
     tex = tex * (1.0 + _highfreq_noise(h, w, rng) * 0.005)
+
+    if channels >= 3:
+        warmth = float(np.clip(sp.paper_warmth, 0.0, 1.0))
+        # 暖调：红/绿略升、蓝明显降。幅度取 ±3~6%，再大就成「泛黄的旧纸」了
+        gains = np.array([1.0 + 0.030 * warmth,
+                          1.0 + 0.004 * warmth,
+                          1.0 - 0.055 * warmth], dtype=np.float32)
+        # 云斑色调也跟着轻微起伏（涂布不均会造成细微色差）
+        tex = tex[..., None] * gains.reshape(1, 1, 3)
+        if sp.paper_cloud > 0.001:
+            tint = _lowfreq_noise(h, w, rng, scale=max(2, int(round(18 * dpi_scale))))
+            tex = tex * (1.0 + tint[..., None] * 0.008 * sp.paper_cloud
+                         * np.array([1.0, 0.35, -0.85], dtype=np.float32).reshape(1, 1, 3))
+
     return np.clip(tex, 0.05, 1.0)
 
 
@@ -298,9 +326,12 @@ def _apply_skew(img: Image.Image, angle_deg: float,
 
 
 def _apply_vignette(arr: np.ndarray, strength: float,
-                    rng: np.random.Generator) -> np.ndarray:
+                    rng: np.random.Generator, channels: int = 1) -> np.ndarray:
     """
     边缘照度衰减 + 单侧装订阴影。扫描仪光源在边缘衰减，盖板压不实的一侧更暗。
+
+    channels=3 时三通道衰减量略有差异：灯管两端的色温会漂移，
+    真实彩色扫描件四角的颜色往往和中心对不上。
     """
     if strength <= 0.001:
         return arr
@@ -317,30 +348,78 @@ def _apply_vignette(arr: np.ndarray, strength: float,
         ramp = ramp[::-1]
     ramp = ramp.reshape(1, -1) if axis == 0 else ramp.reshape(-1, 1)
     vig = vig * (1.0 - strength * 0.075 * ramp)
+
+    if channels >= 3:
+        # 每通道 ±12% 的相对差异，方向随机 → 角落出现轻微色彩漂移
+        rel = 1.0 + (rng.random(3).astype(np.float32) - 0.5) * 0.24 * strength
+        vig = vig[..., None] * rel.reshape(1, 1, 3)
     return arr * vig
 
 
-def apply_scan_effect(gray01: np.ndarray, sp: ScanParams,
+def _color_grade(arr3: np.ndarray, sp: ScanParams,
+                 rng: np.random.Generator) -> np.ndarray:
+    """
+    彩色扫描特有的两项色度处理：白平衡偏差 + 饱和度增益。
+
+    没有这一步，彩色扫描件会「太准」—— 三通道增益完全一致、饱和度原样保留，
+    反而一眼看出是程序生成的。真实扫描仪的白平衡总有偏差，
+    自动校色也总会把饱和度推离原值。
+    """
+    amp = float(np.clip(sp.color_cast, 0.0, 1.0))
+    if amp > 0.001:
+        # 从 青 / 品红 / 黄 三个方向里随机挑一个，幅度由 color_cast 控制。
+        # 用随机方向而不是固定偏色，避免所有输出都朝同一边偏、显得规律。
+        dirs = np.array([[-1.0, +1.0, +1.0],     # 偏青（红通道弱）
+                         [+1.0, -1.0, +1.0],     # 偏品红（绿通道弱）
+                         [+1.0, +1.0, -1.0]], dtype=np.float32)
+        pick = dirs[int(rng.integers(0, 3))]
+        gains = 1.0 + pick * amp * 0.045
+        arr3 = arr3 * gains.reshape(1, 1, 3)
+
+    sat = float(sp.sat_boost)
+    if abs(sat - 1.0) > 0.001:
+        lum = (arr3 @ REC601)[..., None]
+        arr3 = lum + (arr3 - lum) * sat
+
+    return np.clip(arr3, 0.0, 1.0)
+
+
+def apply_scan_effect(sheet01: np.ndarray, sp: ScanParams,
                       rng: np.random.Generator,
                       log_hook=None, dpi_scale: float = 1.0) -> np.ndarray:
     """
     应用扫描效果。
 
-    :param gray01:    float32 (H,W) 打印件的亮度/反射率，[0,1]
+    :param sheet01:   打印到纸面后的**反射率**图，float32 [0,1]。
+                      · (H,W)   灰度反射率
+                      · (H,W,3) RGB 反射率（彩色打印引擎的原始输出）
     :param sp:        扫描参数
     :param dpi_scale: 渲染分辨率 / 标称分辨率。光学模糊 sigma、椒盐点密度都按此换算，
                       保证预览与最终输出看到的是同一个物理效果。
-    :return:          uint8 (H,W) 8bit 灰度扫描件
+    :return:          uint8。
+                      · out_mode=color 且输入为三通道 → (H,W,3) RGB 彩色扫描件
+                      · 其余情况 → (H,W) 8bit 灰度扫描件
+
+    说明：彩色信息**只有**在 out_mode=color 时才会保留三通道。
+    灰度与二值模式依然先按 Rec.601 亮度采样 —— 这是扫描仪黑白模式的实际行为，
+    彩色内容灰化后深浅不同（红字偏浅、黄字几乎消失）正是由这一步产生的。
     """
     def _log(msg: str) -> None:
         if log_hook:
             log_hook(msg)
 
-    h, w = gray01.shape[:2]
+    color = bool(sheet01.ndim == 3 and sp.is_color)
+    if sheet01.ndim == 3 and not color:
+        # 灰度 / 二值模式：扫描仪按亮度采样，三通道塌缩为单通道
+        sheet01 = sheet01 @ REC601
+
+    ch = 3 if color else 1
+    h, w = sheet01.shape[:2]
 
     # 1) 纸底正片叠底：纸反射率 × 墨迹反射率
-    _log("  扫描: 纸底合成")
-    sheet = np.clip(gray01, 0.0, 1.0) * _paper_texture(h, w, sp, rng, dpi_scale)
+    _log("  扫描: 纸底合成" + ("（彩色）" if color else ""))
+    sheet = np.clip(sheet01, 0.0, 1.0) * _paper_texture(
+        h, w, sp, rng, dpi_scale, channels=ch)
 
     # 2) 光学模糊（景深 / 镜头 MTF / 走纸运动模糊）
     _log("  扫描: 光学模糊")
@@ -348,7 +427,7 @@ def apply_scan_effect(gray01: np.ndarray, sp: ScanParams,
     sheet = _blur(sheet, sigma=blur_px)
     if blur_px > 1.2:                      # 强模糊时补一点运动方向模糊
         u8 = np.clip(sheet * 255, 0, 255).astype(np.uint8)
-        im = Image.fromarray(u8, mode="L").filter(
+        im = Image.fromarray(u8, mode="RGB" if color else "L").filter(
             ImageFilter.BoxBlur(radius=blur_px * 0.5))
         sheet = np.asarray(im, dtype=np.float32) / 255.0
 
@@ -358,36 +437,55 @@ def apply_scan_effect(gray01: np.ndarray, sp: ScanParams,
         angle = float(rng.uniform(-sp.skew_random, sp.skew_random)) if sp.skew_random > 0 else 0.0
     if abs(angle) > 0.01:
         _log(f"  扫描: 进纸倾斜 {angle:+.2f}°")
-        tmp = Image.fromarray(np.clip(sheet * 255, 0, 255).astype(np.uint8), mode="L")
-        tmp = _apply_skew(tmp, angle, int(np.clip(sp.paper_base, 0, 255)))
+        mode = "RGB" if color else "L"
+        tmp = Image.fromarray(np.clip(sheet * 255, 0, 255).astype(np.uint8), mode=mode)
+        fill = int(np.clip(sp.paper_base, 0, 255))
+        # 彩色模式下补边要带上纸底色调，否则歪出来的角是中性灰、很突兀
+        tmp = _apply_skew(tmp, angle, (fill, fill, fill) if color
+                          else fill)
         sheet = np.asarray(tmp, dtype=np.float32) / 255.0
 
     # 4) 传感器噪点
     _log("  扫描: 传感器噪点")
     if sp.noise > 0.001:
         # 暗部信噪比差 → 噪声与 (1 - 亮度) 相关，白纸几乎干净
-        gain = (0.35 + 0.65 * (1.0 - sheet))
-        sheet = sheet + _highfreq_noise(h, w, rng) * 0.030 * sp.noise * gain
+        lum = sheet if not color else sheet @ REC601
+        gain = (0.35 + 0.65 * (1.0 - lum))
+        nz = _highfreq_noise3(h, w, rng) if color else _highfreq_noise(h, w, rng)
+        amp = 0.030 * sp.noise
+        sheet = sheet + nz * (amp if not color else amp * 1.35) * (
+            gain if not color else gain[..., None])
         # 椒盐噪点（灰尘、传感器坏点）；概率按面积计，低分辨率下需按面积放大
         rr = rng.random((h, w))
         sp_amt = 0.00030 * sp.noise / max(1e-6, dpi_scale ** 2)
         sp_amt = min(sp_amt, 0.02)
-        sheet = np.where(rr < sp_amt, 0.06, sheet)
-        sheet = np.where((rr > 1.0 - sp_amt), 0.99, sheet)
+        if color:
+            dark = (rr < sp_amt)[..., None]
+            bright = (rr > 1.0 - sp_amt)[..., None]
+            sheet = np.where(dark, 0.06, sheet)
+            sheet = np.where(bright, 0.99, sheet)
+        else:
+            sheet = np.where(rr < sp_amt, 0.06, sheet)
+            sheet = np.where((rr > 1.0 - sp_amt), 0.99, sheet)
         sheet = np.clip(sheet, 0.0, 1.0)
 
     # 5) 边缘暗角
     if sp.vignette > 0.001:
-        sheet = _apply_vignette(sheet, sp.vignette, rng)
+        sheet = _apply_vignette(sheet, sp.vignette, rng, channels=ch)
 
     # 6) 扫描仪自动曝光的阶调调整（对比度/亮度）
     _log("  扫描: 阶调调整")
     sheet = np.clip(sheet * sp.brightness, 0.0, 1.0)
     sheet = np.clip((sheet - 0.5) * sp.contrast + 0.5, 0.0, 1.0)
 
+    # 7) 彩色专用：白平衡偏差 + 饱和度
+    if color:
+        _log("  扫描: 白平衡 / 饱和度")
+        sheet = _color_grade(sheet, sp, rng)
+
     out = np.clip(sheet * 255.0, 0, 255)
 
-    # 7) 二值化（黑白二值扫描模式）
+    # 8) 二值化（黑白二值扫描模式；彩色模式不适用）
     if sp.is_binary:
         _log(f"  扫描: 二值化 (阈值 {sp.binary_threshold})")
         # 阈值加一点空间扰动，避免边缘过于"数学化"
@@ -406,11 +504,16 @@ def simulate(rgb: np.ndarray, pp: PrintParams, sp: ScanParams,
              log_hook=None, dpi_scale: float = 1.0) -> np.ndarray:
     """
     :param rgb: float32 (H,W,3) 页面内容
-    :return:    uint8 (H,W) 扫描件灰度图
+    :return:    uint8。彩色扫描 → (H,W,3)；灰度/二值扫描 → (H,W)
     """
     rng = rng or np.random.default_rng()
-    gray = print_effect_grayscale(rgb, pp, rng, dpi_scale)
-    return apply_scan_effect(gray, sp, rng, log_hook=log_hook, dpi_scale=dpi_scale)
+    if sp.is_color:
+        # 彩色扫描：打印反射率保持三通道，不做灰度化
+        sheet = apply_print_effect(rgb, pp, rng, dpi_scale)
+    else:
+        # 灰度/二值：先按亮度采样（扫描仪黑白模式的实际行为）
+        sheet = print_effect_grayscale(rgb, pp, rng, dpi_scale)
+    return apply_scan_effect(sheet, sp, rng, log_hook=log_hook, dpi_scale=dpi_scale)
 
 
 __all__ = [

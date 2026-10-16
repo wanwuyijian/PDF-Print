@@ -10,8 +10,8 @@ APP_NAME = "PDF 打印扫描模拟器"          # 显示名称（中文）
 APP_NAME_EN = "PdfPrintScanSimulator"      # 英文标识（用于目录名、文件名）
 APP_ID = "com.local.pdfprint.scansim"      # 应用唯一标识
 
-__version__ = "1.0.3"
-BUILD_DATE = "2026-10-15"
+__version__ = "1.0.4"
+BUILD_DATE = "2026-10-16"
 AUTHOR = "PdfPrint"
 
 # ---- 语义化版本拆分（供 exe 文件属性 / 比较使用）----
@@ -20,5 +20,5 @@ VERSION_TUPLE = (VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, 0)
 
 
 def version_string() -> str:
-    """返回带产品名的完整版本串，例如：PDF 打印扫描模拟器 v1.0.3 (2026-10-15)"""
+    """返回带产品名的完整版本串，例如：PDF 打印扫描模拟器 v1.0.4 (2026-10-16)"""
     return f"{APP_NAME} v{__version__} ({BUILD_DATE})"

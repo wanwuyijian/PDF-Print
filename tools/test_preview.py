@@ -41,7 +41,7 @@ def main():
     pump(app, 1.2)
     print(f"会话构建完成 {time.perf_counter() - t0:.2f}s, session={'OK' if win.session else 'NULL'}")
     assert win.session is not None, "预览会话未构建成功"
-    print("  预览尺寸:", win.session.base_gray.shape, win.session.info)
+    print("  预览尺寸:", win.session.base_rgb.shape, win.session.info)
     print("  信息栏:", win.lbl_info.cget("text").replace("\n", " | "))
 
     # --- 测试三个核心滑块 ---
