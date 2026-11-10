@@ -438,12 +438,22 @@ def process_pdf(src_path: str | Path,
             log.info("输出目标: %s\\%s_pNNN%s", out_dir, base, img_ext)
 
         # 随机种子
+        #
+        # 这里不再用一个 rng 贯穿所有页面。真实的一叠扫描件来自同一批纸、
+        # 同一次过机：纸底纹理、传感器噪点、偏色方向、盖板阴影、灰尘位置
+        # 几乎完全一样，只有进纸歪斜会有几十分之一度的差别。
+        # 旧实现让一个发生器连续吐随机数，导致歪斜方向、脏点位置、整体偏色
+        # 逐页乱跳，翻页时像在看十几份不同的扫描件 —— 这是「输出太难看」的根源。
+        #
+        # 现在：doc_seed 决定整份的纸张/传感器指纹，页面级差异只在
+        # scan_params.page_variation 允许时才引入（见 effects.page_seed）。
         if op.seed:
-            rng = np.random.default_rng(int(op.seed))
-            log.info("随机种子固定为 %d（效果可复现）", op.seed)
+            doc_seed = int(op.seed)
+            log.info("随机种子固定为 %d（效果可复现）", doc_seed)
         else:
-            rng = np.random.default_rng()
-            log.info("随机种子: 自动（每次不同）")
+            doc_seed = int(np.random.default_rng().integers(1, 2 ** 31 - 1))
+            log.info("随机种子: 自动（本次 %d，同批文件共用这套指纹）", doc_seed)
+        log.info("页面间效果: %s", sp.variation_label)
 
         done = 0
         total = len(indices)
@@ -479,8 +489,14 @@ def process_pdf(src_path: str | Path,
             _tick(done, total,
                   f"第 {order + 1}/{total} 页：模拟{pp.mode_label.split('（')[0]}…")
             tp = time.perf_counter()
+            # 每页的随机性只来自 page_seed（整份统一 → 与页号无关），
+            # 倾斜角单独解析：uniform 时整份共用一个角度。
+            rng = np.random.default_rng(
+                effects.page_seed(doc_seed, pidx, sp.page_variation))
+            skew = effects.resolve_skew(sp, doc_seed, pidx)
             scanned = effects.simulate(sheet, pp, sp, rng,
-                                    log_hook=lambda m: log.debug("%s", m.strip()))
+                                    log_hook=lambda m: log.debug("%s", m.strip()),
+                                    skew_deg=skew)
             del sheet
             log.info("第 %d 页 打印+扫描模拟完成 %.2fs", pidx + 1, time.perf_counter() - tp)
 
@@ -552,14 +568,21 @@ def process_pdf(src_path: str | Path,
 # --------------------------------------------------------------------------- #
 class PreviewSession:
     """
-    把「PDF 渲染 → 排版 → 打印效果」一次算完并缓存下来，之后只重跑**扫描阶段**。
+    把「PDF 渲染 → 排版」一次算完并缓存下来，之后可以只重跑**打印阶段**
+    或只重跑**扫描阶段**。
 
     为什么要这样切分：
-        渲染 PDF 页 + 打印模拟 约 150~300ms，扫描模拟只要 30~80ms。
-        把前面的结果缓存住，模糊度/噪点/倾斜度这类**扫描侧参数**就能做到滑动时近乎实时刷新。
+        渲染 PDF 页（100~250ms）> 打印模拟（40~120ms）> 扫描模拟（30~80ms）。
+        把排版结果缓存住：
+          * 调扫描参数（模糊/噪点/倾斜/纸底…）→ 只跑扫描阶段，滑动时近乎实时
+          * 调打印参数（浓度/扩散/颗粒/底灰/纸张类型…）→ 只跑打印阶段，仍然很快
+        旧版只缓存了打印结果，所以预览窗口里根本改不了打印参数 —— 一改就得
+        重新渲染 PDF 页，拖动滑块会卡到无法使用。
 
-    另外：整个会话使用**固定随机种子**，这样每次重算时纸底云斑、噪点图案的位置
-    完全不变，只有强度在变 —— 调参时画面不会乱跳，才能看清楚参数本身的影响。
+    随机性：整个会话使用**固定文档种子**，纸底云斑、噪点图案、偏色方向、灰尘位置
+    在调参过程中完全不变，只有强度在变 —— 否则画面每帧都在乱跳，根本看不清
+    参数本身的影响。页面间是否变化由 scan_params.page_variation 决定，
+    与正式输出使用同一套 page_seed 规则，所以预览看到的就是输出得到的。
     """
 
     DEFAULT_SEED = 20261014
@@ -570,6 +593,7 @@ class PreviewSession:
         self.src = Path(src_path)
         self.page_index = page_index
         self.seed = int(seed) if seed else self.DEFAULT_SEED
+        self.job = job
         self.info: dict = {}
 
         doc = open_pdf(self.src)
@@ -597,23 +621,16 @@ class PreviewSession:
             mp = paper.mm_to_px(margin_mm, dpi)
 
             content = render_page_rgb(page, dpi)
-            sheet = compose_sheet(content, sw, sh, mp, lp.scale_mode)
+            self.sheet = compose_sheet(content, sw, sh, mp, lp.scale_mode)
             del content
 
             # DPI 补偿：预览分辨率通常低于正式输出的渲染分辨率。
-            # 墨点扩散、光学模糊、云斑尺度都是按像素定义的量，
+            # 墨点扩散、光学模糊、云斑尺度、灰尘粒径都是按像素定义的量，
             # 不做补偿的话预览会比真实输出「糊好几倍」，调参就失去意义。
             self.dpi_scale = dpi / float(op.render_dpi)
 
-            # 打印阶段：只算一次。
-            # 这里刻意缓存**三通道反射率**而不是灰度 —— 预览窗口里用户可以
-            # 随时切换「灰度/二值/彩色」扫描模式，如果打印阶段就灰化了，
-            # 切到彩色也只会看到灰的（v1.0.3 之前预览只有黑白两色就是这个原因）。
-            # 灰化推迟到 apply_scan_effect 内部按 out_mode 决定。
-            rng = np.random.default_rng(self.seed)
-            self.base_rgb = effects.apply_print_effect(
-                sheet, job.print_params, rng, dpi_scale=self.dpi_scale)
-            del sheet
+            self.base_rgb = None
+            self.reprint(job.print_params)
 
             self.info = {
                 "page_index": page_index,
@@ -623,10 +640,43 @@ class PreviewSession:
                 "dpi_scale": self.dpi_scale,
                 "sheet_mm": (sheet_w_mm, sheet_h_mm),
                 "src_mm": (src_w_mm, src_h_mm),
-                "px": self.base_rgb.shape[:2],
+                "px": self.sheet.shape[:2],
             }
         finally:
             doc.close()
+
+    # -- 内部 ------------------------------------------------------------- #
+    @staticmethod
+    def _downscale(arr: np.ndarray, scale: float) -> np.ndarray:
+        if not (0.15 < scale < 0.995):
+            return arr
+        h, w = arr.shape[:2]
+        nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+        u8 = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        mode = "RGB" if arr.ndim == 3 else "L"
+        small = Image.fromarray(u8, mode=mode).resize((nw, nh), Image.BILINEAR)
+        return np.asarray(small, dtype=np.float32) / 255.0
+
+    # -- 对外 ------------------------------------------------------------- #
+    def reprint(self, print_params) -> np.ndarray:
+        """
+        仅重跑**打印阶段**（排版结果已缓存）。
+
+        打印阶段在预览分辨率下只要 40~120ms，比重新渲染 PDF 页（200~400ms）快得多，
+        所以拖动浓度/扩散/颗粒/底灰这些滑块可以做到实时。
+        这里始终按全分辨率算并存下，快速预览的降采样交给 rescan 统一处理，
+        避免「快图把缓存覆盖成低分辨率 → 下次精修变糊」的坑。
+
+        :return: float32 反射率图 (H,W,3)
+        """
+        # 打印阶段的随机性（碳粉颗粒、掉粉、底灰云斑）与页序无关：
+        # 整份文件是同一台打印机、同一批纸印出来的，纸面颗粒指纹本来就该一致。
+        # 这也保证拖动浓度滑块时颗粒图案不会整片重排（否则看着像换了张纸）。
+        rng = np.random.default_rng(effects.page_seed(self.seed, 0, "uniform"))
+        self.base_rgb = effects.apply_print_effect(
+            self.sheet, print_params, rng, dpi_scale=self.dpi_scale)
+        self.print_params = print_params
+        return self.base_rgb
 
     def rescan(self, scan_params: ScanParams, scale: float = 1.0) -> np.ndarray:
         """
@@ -638,18 +688,22 @@ class PreviewSession:
         :return: uint8。彩色扫描 → (H,W,3)；灰度/二值 → (H,W)
         """
         base = self.base_rgb
-        dpi_scale = getattr(self, "dpi_scale", 1.0)
-
+        if base is None:
+            base = self.reprint(self.job.print_params)
+        dpi_scale = self.dpi_scale
+        base = self._downscale(base, scale)
         if 0.15 < scale < 0.995:
-            h, w = base.shape[:2]
-            nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-            u8 = np.clip(base * 255.0, 0, 255).astype(np.uint8)
-            small = Image.fromarray(u8, mode="RGB").resize((nw, nh), Image.BILINEAR)
-            base = np.asarray(small, dtype=np.float32) / 255.0
             dpi_scale *= scale
 
-        rng = np.random.default_rng(self.seed)
-        return effects.apply_scan_effect(base, scan_params, rng, dpi_scale=dpi_scale)
+        # 用**传入的** scan_params 决定页面间变化模式与倾斜角，
+        # 这样在预览里切换「整份统一 / 逐页随机」能立刻看到差别。
+        variation = getattr(scan_params, "page_variation", "uniform")
+        rng = np.random.default_rng(
+            effects.page_seed(self.seed, self.page_index, variation))
+        skew = effects.resolve_skew(scan_params, self.seed, self.page_index)
+        return effects.apply_scan_effect(
+            base, scan_params, rng, dpi_scale=dpi_scale, skew_deg=skew)
+
 
 
 def render_preview(src_path: str | Path, job: RenderJob,
@@ -659,7 +713,8 @@ def render_preview(src_path: str | Path, job: RenderJob,
     生成单页预览图（一次性），自动限制尺寸以保证速度。
     """
     session = PreviewSession(src_path, job, page_index=page_index, max_side=max_side)
-    return Image.fromarray(session.rescan(job.scan_params), mode="L")
+    arr = session.rescan(job.scan_params)
+    return Image.fromarray(arr, mode="RGB" if arr.ndim == 3 else "L")
 
 
 def pdf_page_count(path: str | Path) -> int:

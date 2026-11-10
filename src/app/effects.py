@@ -16,6 +16,18 @@
                 比黑白打印明显发灰；四色套印不准 → 边缘彩边 → 灰化后边缘发虚
     * 彩色喷墨：墨量更足但暗部发闷（反射率下限 0.23），偏青
     * 纸不是纯白：正片叠底后底灰自然下降（245 左右），且带低频云斑
+
+── 页面间一致性（v1.0.5 的核心改动）──────────────────────────────────────
+真实的一叠扫描件来自同一批纸、同一次过机：纸底纹理、传感器噪点、偏色方向、
+盖板阴影、灰尘位置几乎完全一样，只有进纸歪斜会有几十分之一度的差别。
+旧版让一个随机数发生器贯穿所有页面，导致歪斜方向、脏点位置、整体偏色逐页乱跳，
+翻页时像在看十几份不同的扫描件 —— 这是「输出太难看」的根源。
+
+现在把随机性拆成两层：
+    * 文档级指纹（doc_seed）：纸底、噪点场、暗角方向、白平衡方向、灰尘位置
+    * 页面级差异（page_index）：仅在 page_variation 允许时才引入
+三种模式见 config.PAGE_VARIATIONS：uniform（整份统一）/ jitter（仅倾斜微抖）/
+random（逐页随机，需要「杂乱感」时才用）。
 """
 
 from __future__ import annotations
@@ -41,6 +53,61 @@ _BAYER8 = np.array([
     [15, 47, 7, 39, 13, 45, 5, 37],
     [63, 31, 55, 23, 61, 29, 53, 21],
 ], dtype=np.float32) / 63.0
+
+_MASK32 = (1 << 32) - 1
+
+
+# --------------------------------------------------------------------------- #
+# 随机性分层：文档级指纹 / 页面级差异
+# --------------------------------------------------------------------------- #
+def _mix(seed: int, salt: int, page: int = 0) -> int:
+    """把 (文档种子, 用途盐, 页序号) 混成一个 32 位种子。
+
+    用大质数乘法而不是 Python 的 hash()：hash() 在同一进程内对不同 int
+    是确定的，但跨版本/跨进程不保证，会让「固定种子可复现」这个承诺失效。
+    """
+    v = (int(seed) & _MASK32) * 2654435761
+    v ^= (int(salt) & _MASK32) * 40503
+    v ^= (int(page) & _MASK32) * 2246822519
+    v &= _MASK32
+    # 再打散一轮，避免相邻 salt 只差低位
+    v ^= v >> 15
+    v = (v * 2246822519) & _MASK32
+    v ^= v >> 13
+    return int(v) or 1
+
+
+def page_seed(doc_seed: int, page_index: int, variation: str) -> int:
+    """
+    某页的成像随机种子。
+
+    uniform / jitter → 与页序号无关（整份共用一套纹理指纹）
+    random           → 每页不同
+    """
+    if variation == "random":
+        return _mix(doc_seed, 17, page_index + 1)
+    return _mix(doc_seed, 17)
+
+
+def resolve_skew(sp: ScanParams, doc_seed: int, page_index: int) -> float:
+    """
+    本页的进纸倾斜角（度）。
+
+    * sp.skew_deg 非 None：固定角度，所有页一致
+    * uniform：整份一个角度（同一次进纸、同一台机器，角度基本一致）
+    * jitter / random：每页在 ±sp.skew_random 内独立抽取
+      —— 只有这里是真实文档里「每页看起来不同」的正当来源
+    """
+    if sp.skew_deg is not None:
+        return float(sp.skew_deg)
+    amp = float(sp.skew_random or 0.0)
+    if amp <= 0.0:
+        return 0.0
+    if sp.page_variation == "uniform":
+        rng = np.random.default_rng(_mix(doc_seed, 91))
+    else:
+        rng = np.random.default_rng(_mix(doc_seed, 91, page_index + 1))
+    return float(rng.uniform(-amp, amp))
 
 
 # --------------------------------------------------------------------------- #
@@ -105,6 +172,16 @@ def _lowfreq_noise(h: int, w: int, rng: np.random.Generator,
     return out
 
 
+def _smooth1d(n: int, rng: np.random.Generator, scale: int = 8) -> np.ndarray:
+    """一维平滑随机序列（零均值），用于纵向条纹的列增益起伏"""
+    scale = max(1, int(scale))
+    m = max(2, n // scale)
+    small = rng.normal(0.0, 1.0, (1, m)).astype(np.float32)
+    img = Image.fromarray(np.clip(small * 40 + 128, 0, 255).astype(np.uint8), mode="L")
+    img = img.resize((n, 1), Image.BICUBIC)
+    return (np.asarray(img, dtype=np.float32)[0] - 128.0) / 40.0
+
+
 def _highfreq_noise(h: int, w: int, rng: np.random.Generator) -> np.ndarray:
     return rng.normal(0.0, 1.0, (h, w)).astype(np.float32)
 
@@ -144,6 +221,7 @@ def _print_mono(rgb: np.ndarray, pp: PrintParams,
                 rng: np.random.Generator, dpi_scale: float = 1.0) -> np.ndarray:
     """黑白激光打印机：单色碳粉转印"""
     floor, spread_base, _misreg, _sat, _cast = pp.trait()
+    spread_mul, grain_mul = pp.paper_traits()
     h, w = rgb.shape[:2]
 
     # 1) 灰度化（打印机驱动做色彩→灰度的转换）
@@ -161,19 +239,27 @@ def _print_mono(rgb: np.ndarray, pp: PrintParams,
                       pivot=0.42)
     cov = np.clip(cov * pp.density, 0.0, 1.0)
 
-    # 4) 墨粉扩散（纸纤维毛细渗透 / 定影压力不均）
-    cov = _blur(cov, sigma=spread_base * (0.35 + pp.spread * 1.9) * dpi_scale)
+    # 4) 墨粉扩散（纸纤维毛细渗透 / 定影压力不均）。涂布纸几乎不渗，草纸渗得厉害
+    cov = _blur(cov, sigma=spread_base * (0.35 + pp.spread * 1.9) * spread_mul * dpi_scale)
 
     # 5) 碳粉颗粒：单个碳粉颗粒是否转印成功具有随机性
     if pp.grain > 0.001:
-        cov = cov + _highfreq_noise(h, w, rng) * 0.085 * pp.grain * np.clip(cov * 2.2, 0, 1)
+        cov = cov + _highfreq_noise(h, w, rng) * 0.085 * pp.grain * grain_mul \
+            * np.clip(cov * 2.2, 0, 1)
         cov = np.clip(cov, 0.0, 1.0)
         # 高光区偶发掉粉（脏点）；概率按面积计，低分辨率预览下要按比例放大，
         # 否则同一张纸在预览里的脏点会明显少于最终输出。
-        dirt = rng.random((h, w)).astype(np.float32) < (0.00035 * pp.grain / dpi_scale ** 2)
+        dirt = rng.random((h, w)).astype(np.float32) \
+            < (0.00035 * pp.grain * grain_mul / dpi_scale ** 2)
         cov = np.where(dirt, np.maximum(cov, 0.55), cov)
 
-    # 6) 反射率合成（碳粉反射率 floor ≈ 0.045）
+    # 6) 底灰（fog）：定影不净时白底会浮一层极淡的碳粉雾。
+    #    幅度必须极小（≤3 个灰阶），否则白纸变灰纸。
+    if pp.fog > 0.001:
+        veil = _lowfreq_noise(h, w, rng, scale=max(2, int(round(40 * dpi_scale))))
+        cov = np.clip(cov + pp.fog * 0.030 * (0.65 + 0.35 * veil), 0.0, 1.0)
+
+    # 7) 反射率合成（碳粉反射率 floor ≈ 0.045）
     refl = 1.0 - cov * (1.0 - floor)
     return np.stack([refl, refl, refl], axis=-1)
 
@@ -182,6 +268,7 @@ def _print_color(rgb: np.ndarray, pp: PrintParams,
                  rng: np.random.Generator, dpi_scale: float = 1.0) -> np.ndarray:
     """彩色激光 / 彩色喷墨：CMYK 减色法叠印"""
     floor, spread_base, misreg, sat_gain, cast = pp.trait()
+    spread_mul, grain_mul = pp.paper_traits()
     h, w = rgb.shape[:2]
 
     # 1) 打印机色彩管理：彩度增益（打印机色域压缩后再拉伸，颜色会「艳而闷」）
@@ -205,7 +292,7 @@ def _print_color(rgb: np.ndarray, pp: PrintParams,
     ink = np.clip(ink * pp.density, 0.0, 1.0)
 
     # 5) 四色套印不准：每个色版扩散程度不同 + 亚像素位移 → 边缘彩边
-    chan_sigma = spread_base * (0.35 + pp.spread * 1.9) * dpi_scale
+    chan_sigma = spread_base * (0.35 + pp.spread * 1.9) * spread_mul * dpi_scale
     shift_px = int(round(misreg * pp.misregister * 2.0 * dpi_scale))
     for i in range(3):
         s = chan_sigma * (0.78 + 0.22 * i + 0.18 * pp.misregister * (i - 1))
@@ -223,14 +310,20 @@ def _print_color(rgb: np.ndarray, pp: PrintParams,
     # 6) 墨滴/碳粉颗粒
     if pp.grain > 0.001:
         ink = np.clip(ink + _highfreq_noise(h, w, rng)[..., None]
-                      * 0.06 * pp.grain * np.clip(ink.sum(-1, keepdims=True), 0, 1.6),
+                      * 0.06 * pp.grain * grain_mul
+                      * np.clip(ink.sum(-1, keepdims=True), 0, 1.6),
                       0.0, 1.0)
 
     # 7) 反射率 = 1 - 墨量×(1-反射率下限)，并保证不低于墨的反射率下限（合成黑发灰的根源）
     refl = 1.0 - ink * (1.0 - floor)
     refl = np.maximum(refl, floor)
 
-    # 8) 色偏（各色版增益偏差）：喷墨偏青、激光偏冷
+    # 8) 底灰：彩色机四色版都会留一点点底，暗部之外的白底也会脏
+    if pp.fog > 0.001:
+        veil = _lowfreq_noise(h, w, rng, scale=max(2, int(round(40 * dpi_scale))))
+        refl = refl * (1.0 - pp.fog * 0.028 * (0.65 + 0.35 * veil))[..., None]
+
+    # 9) 色偏（各色版增益偏差）：喷墨偏青、激光偏冷
     refl = np.clip(refl + np.array(cast, dtype=np.float32).reshape(1, 1, 3), 0.0, 1.0)
     return refl
 
@@ -314,7 +407,7 @@ def _paper_texture(h: int, w: int, sp: ScanParams,
 
 
 def _apply_skew(img: Image.Image, angle_deg: float,
-                fill_gray: int) -> Image.Image:
+                fill_gray) -> Image.Image:
     """
     进纸倾斜：绕中心旋转并保持画布尺寸（超出的边角被裁掉，露出的一角补纸色）。
     这正是扫描件的真实表现 —— 内容不会因为歪了而缩小。
@@ -356,6 +449,102 @@ def _apply_vignette(arr: np.ndarray, strength: float,
     return arr * vig
 
 
+def _apply_streaks(arr: np.ndarray, amount: float,
+                   rng: np.random.Generator, dpi_scale: float = 1.0,
+                   channels: int = 1) -> np.ndarray:
+    """
+    纵向条纹：CIS/CCD 传感器逐列增益标定不均、走纸划痕、灯管脏污。
+
+    这是老式扫描仪最典型的毛病，而且**方向永远是走纸方向**（竖直），
+    与内容无关 —— 所以必须放在倾斜之后按扫描坐标施加，而不是跟着纸转。
+    """
+    if amount <= 0.001:
+        return arr
+    h, w = arr.shape[:2]
+
+    # 1) 全幅缓慢的列增益起伏
+    g = _smooth1d(w, rng, scale=max(2, int(round(12 * dpi_scale))))
+    gain = 1.0 + g * 0.030 * amount
+
+    # 2) 少数几根明显的亮线/暗线（灯管划伤、镜头脏点）
+    n_lines = int(rng.integers(1, 4))
+    for _ in range(n_lines):
+        x = int(rng.integers(0, max(1, w)))
+        width = max(1, int(round(rng.uniform(0.6, 1.8) * max(0.4, dpi_scale))))
+        amp = float(rng.uniform(0.025, 0.085)) * amount * (1 if rng.random() < 0.5 else -1)
+        x0, x1 = max(0, x - width // 2), min(w, x + width // 2 + 1)
+        gain[x0:x1] += amp
+
+    gain = np.clip(gain, 0.75, 1.25).astype(np.float32)
+    if channels >= 3:
+        # 各通道的列增益不完全相同 → 条纹带一点颜色
+        tint = 1.0 + (rng.random(3).astype(np.float32) - 0.5) * 0.5 * amount
+        gain = gain[..., None] * tint.reshape(1, 1, 3)
+    else:
+        gain = gain.reshape(1, -1)
+    return arr * gain
+
+
+def _dust_layer(h: int, w: int, sp: ScanParams, rng: np.random.Generator,
+                dpi_scale: float = 1.0):
+    """
+    灰尘 / 污渍层。
+
+    与传感器噪点分开：噪点是逐像素的高频抖动，而灰尘是**成块的**污点 ——
+    纸面粉尘、复印机鼓面残留、盖板玻璃上的毛屑。
+
+    直接在成品分辨率上逐个画斑点（圆形、边缘柔和衰减），而不是在低分辨率网格
+    上撒点再放大 —— 后者放大出来是硬边方块，一眼就是「马赛克噪点」。
+    """
+    density = float(np.clip(sp.dust, 0.0, 1.0))
+    if density <= 0.001:
+        return None
+
+    scale = max(0.4, dpi_scale)
+
+    # 斑点数按物理面积给：dust=1 时约 0.6 个/cm²。A4@200dpi 约 620cm²，
+    # 也就是 ~370 个点 —— 一页上零星可见的脏污。
+    # 早期版本按 3 个/cm² 给，整页近两千个点，看起来像下雪，不像扫描件。
+    # 注意 1 in² = 6.4516 cm²，是乘不是除 —— 除反了会让点数少两个数量级，
+    # 小图（自检用的测试页）直接归零，滑块看起来完全没反应。
+    in2 = (h / (200.0 * scale)) * (w / (200.0 * scale))
+    area_cm2 = in2 * 6.4516
+    n_dark = int(round(area_cm2 * density * 0.6))
+    n_light = int(round(n_dark * 0.45))
+
+    dark = np.zeros((h, w), dtype=np.float32)
+    light = np.zeros((h, w), dtype=np.float32)
+
+    def _sprinkle(canvas: np.ndarray, count: int) -> None:
+        if count <= 0:
+            return
+        ys = rng.integers(0, h, count)
+        xs = rng.integers(0, w, count)
+        # 半径：多数是 0.3~0.8mm 的细尘，少数是 1~2mm 的纸屑/毛屑
+        radii = rng.uniform(1.0, 2.6, count) * scale
+        big = rng.random(count) < 0.08
+        radii[big] = rng.uniform(3.0, 6.5, int(big.sum())) * scale
+        # 强度也随机：有的只是淡影，有的是实心黑点
+        amps = rng.uniform(0.30, 1.0, count)
+        for y, x, rad, amp in zip(ys, xs, radii, amps):
+            r = int(np.ceil(rad * 1.8))
+            y0, y1 = max(0, y - r), min(h, y + r + 1)
+            x0, x1 = max(0, x - r), min(w, x + r + 1)
+            if y0 >= y1 or x0 >= x1:
+                continue
+            yy = np.arange(y0, y1, dtype=np.float32) - y
+            xx = np.arange(x0, x1, dtype=np.float32) - x
+            d2 = (yy[:, None] ** 2 + xx[None, :] ** 2) / (rad * rad)
+            # 高斯衰减：中心实、边缘虚，不会留下方块轮廓
+            spot = np.exp(-d2 * 1.6).astype(np.float32) * amp
+            region = canvas[y0:y1, x0:x1]
+            np.maximum(region, spot, out=region)
+
+    _sprinkle(dark, n_dark)
+    _sprinkle(light, n_light)
+    return dark, light
+
+
 def _color_grade(arr3: np.ndarray, sp: ScanParams,
                  rng: np.random.Generator) -> np.ndarray:
     """
@@ -386,7 +575,8 @@ def _color_grade(arr3: np.ndarray, sp: ScanParams,
 
 def apply_scan_effect(sheet01: np.ndarray, sp: ScanParams,
                       rng: np.random.Generator,
-                      log_hook=None, dpi_scale: float = 1.0) -> np.ndarray:
+                      log_hook=None, dpi_scale: float = 1.0,
+                      skew_deg: float | None = None) -> np.ndarray:
     """
     应用扫描效果。
 
@@ -396,6 +586,9 @@ def apply_scan_effect(sheet01: np.ndarray, sp: ScanParams,
     :param sp:        扫描参数
     :param dpi_scale: 渲染分辨率 / 标称分辨率。光学模糊 sigma、椒盐点密度都按此换算，
                       保证预览与最终输出看到的是同一个物理效果。
+    :param skew_deg:  本页倾斜角。None 时按 sp.skew_deg / sp.skew_random 自行抽取；
+                      由调用方传入是为了让「整份统一」模式下所有页面用同一个角度，
+                      而「仅倾斜微抖」模式下只有这一项逐页不同（其余纹理完全一致）。
     :return:          uint8。
                       · out_mode=color 且输入为三通道 → (H,W,3) RGB 彩色扫描件
                       · 其余情况 → (H,W) 8bit 灰度扫描件
@@ -432,60 +625,69 @@ def apply_scan_effect(sheet01: np.ndarray, sp: ScanParams,
         sheet = np.asarray(im, dtype=np.float32) / 255.0
 
     # 3) 进纸倾斜（几何变形要在加噪之前，噪声属于传感器、不该被重采样）
-    angle = sp.skew_deg
+    angle = skew_deg
     if angle is None:
-        angle = float(rng.uniform(-sp.skew_random, sp.skew_random)) if sp.skew_random > 0 else 0.0
+        angle = sp.skew_deg
+    if angle is None:
+        angle = float(rng.uniform(-sp.skew_random, sp.skew_random)) \
+            if sp.skew_random > 0 else 0.0
     if abs(angle) > 0.01:
         _log(f"  扫描: 进纸倾斜 {angle:+.2f}°")
         mode = "RGB" if color else "L"
         tmp = Image.fromarray(np.clip(sheet * 255, 0, 255).astype(np.uint8), mode=mode)
         fill = int(np.clip(sp.paper_base, 0, 255))
         # 彩色模式下补边要带上纸底色调，否则歪出来的角是中性灰、很突兀
-        tmp = _apply_skew(tmp, angle, (fill, fill, fill) if color
-                          else fill)
+        tmp = _apply_skew(tmp, angle, (fill, fill, fill) if color else fill)
         sheet = np.asarray(tmp, dtype=np.float32) / 255.0
 
-    # 4) 传感器噪点
+    # 4) 纵向条纹（传感器列增益不均，在扫描坐标里，必须晚于倾斜）
+    if sp.streak > 0.001:
+        _log("  扫描: 纵向条纹")
+        sheet = _apply_streaks(sheet, sp.streak, rng, dpi_scale, channels=ch)
+
+    # 5) 传感器噪点（高斯，暗部信噪比差 → 与 (1 - 亮度) 相关，白纸几乎干净）
     _log("  扫描: 传感器噪点")
     if sp.noise > 0.001:
-        # 暗部信噪比差 → 噪声与 (1 - 亮度) 相关，白纸几乎干净
         lum = sheet if not color else sheet @ REC601
         gain = (0.35 + 0.65 * (1.0 - lum))
         nz = _highfreq_noise3(h, w, rng) if color else _highfreq_noise(h, w, rng)
         amp = 0.030 * sp.noise
         sheet = sheet + nz * (amp if not color else amp * 1.35) * (
             gain if not color else gain[..., None])
-        # 椒盐噪点（灰尘、传感器坏点）；概率按面积计，低分辨率下需按面积放大
-        rr = rng.random((h, w))
-        sp_amt = 0.00030 * sp.noise / max(1e-6, dpi_scale ** 2)
-        sp_amt = min(sp_amt, 0.02)
-        if color:
-            dark = (rr < sp_amt)[..., None]
-            bright = (rr > 1.0 - sp_amt)[..., None]
-            sheet = np.where(dark, 0.06, sheet)
-            sheet = np.where(bright, 0.99, sheet)
-        else:
-            sheet = np.where(rr < sp_amt, 0.06, sheet)
-            sheet = np.where((rr > 1.0 - sp_amt), 0.99, sheet)
         sheet = np.clip(sheet, 0.0, 1.0)
 
-    # 5) 边缘暗角
+    # 6) 灰尘 / 污渍（成块斑点，与逐像素噪点分开）
+    if sp.dust > 0.001:
+        _log("  扫描: 灰尘污渍")
+        layer = _dust_layer(h, w, sp, rng, dpi_scale)
+        if layer is not None:
+            dark, light = layer
+            strength = 0.55 + 0.35 * sp.dust
+            if color:
+                sheet = sheet * (1.0 - dark[..., None] * strength)
+                sheet = sheet + (1.0 - sheet) * (light[..., None] * strength * 0.8)
+            else:
+                sheet = sheet * (1.0 - dark * strength)
+                sheet = sheet + (1.0 - sheet) * (light * strength * 0.8)
+            sheet = np.clip(sheet, 0.0, 1.0)
+
+    # 7) 边缘暗角
     if sp.vignette > 0.001:
         sheet = _apply_vignette(sheet, sp.vignette, rng, channels=ch)
 
-    # 6) 扫描仪自动曝光的阶调调整（对比度/亮度）
+    # 8) 扫描仪自动曝光的阶调调整（对比度/亮度）
     _log("  扫描: 阶调调整")
     sheet = np.clip(sheet * sp.brightness, 0.0, 1.0)
     sheet = np.clip((sheet - 0.5) * sp.contrast + 0.5, 0.0, 1.0)
 
-    # 7) 彩色专用：白平衡偏差 + 饱和度
+    # 9) 彩色专用：白平衡偏差 + 饱和度
     if color:
         _log("  扫描: 白平衡 / 饱和度")
         sheet = _color_grade(sheet, sp, rng)
 
     out = np.clip(sheet * 255.0, 0, 255)
 
-    # 8) 二值化（黑白二值扫描模式；彩色模式不适用）
+    # 10) 二值化（黑白二值扫描模式；彩色模式不适用）
     if sp.is_binary:
         _log(f"  扫描: 二值化 (阈值 {sp.binary_threshold})")
         # 阈值加一点空间扰动，避免边缘过于"数学化"
@@ -501,7 +703,8 @@ def apply_scan_effect(sheet01: np.ndarray, sp: ScanParams,
 # --------------------------------------------------------------------------- #
 def simulate(rgb: np.ndarray, pp: PrintParams, sp: ScanParams,
              rng: np.random.Generator | None = None,
-             log_hook=None, dpi_scale: float = 1.0) -> np.ndarray:
+             log_hook=None, dpi_scale: float = 1.0,
+             skew_deg: float | None = None) -> np.ndarray:
     """
     :param rgb: float32 (H,W,3) 页面内容
     :return:    uint8。彩色扫描 → (H,W,3)；灰度/二值扫描 → (H,W)
@@ -513,10 +716,12 @@ def simulate(rgb: np.ndarray, pp: PrintParams, sp: ScanParams,
     else:
         # 灰度/二值：先按亮度采样（扫描仪黑白模式的实际行为）
         sheet = print_effect_grayscale(rgb, pp, rng, dpi_scale)
-    return apply_scan_effect(sheet, sp, rng, log_hook=log_hook, dpi_scale=dpi_scale)
+    return apply_scan_effect(sheet, sp, rng, log_hook=log_hook,
+                             dpi_scale=dpi_scale, skew_deg=skew_deg)
 
 
 __all__ = [
     "pil_to_float", "float_to_pil", "apply_print_effect",
     "print_effect_grayscale", "apply_scan_effect", "simulate",
+    "page_seed", "resolve_skew",
 ]

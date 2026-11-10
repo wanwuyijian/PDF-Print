@@ -32,7 +32,8 @@ from PIL import Image
 
 from . import engine, logsetup, paper, paths
 from .config import (BUILTIN_PRESETS, OUTPUT_FORMATS, ORIENTATIONS,
-                     PRESET_ORDER, PRINT_MODES, SCALE_MODES, LayoutParams,
+                     PAGE_VARIATIONS, PRESET_ORDER, PRINT_MODES,
+                     PRINT_PAPER_TYPES, SCALE_MODES, LayoutParams,
                      OutputParams, PrintParams, RenderJob, ScanParams)
 from .logsetup import get_logger
 from .paths import config_dir, default_output_dir, resource_path
@@ -52,10 +53,12 @@ class SliderRow:
     """一行「标签 + 滑块 + 数值」，数值实时回显"""
 
     def __init__(self, parent, row: int, label: str, var, lo: float, hi: float,
-                 fmt: str = "{:.2f}", width_label: int = 16, tip: str = ""):
+                 fmt: str = "{:.2f}", width_label: int = 16, tip: str = "",
+                 on_change=None):
         self.var = var
         self.fmt = fmt
         self.tip = tip
+        self.on_change = on_change
         lbl = ttk.Label(parent, text=label, width=width_label, anchor="w")
         lbl.grid(row=row, column=0, sticky="w", padx=(0, 4), pady=2)
         self.scale = ttk.Scale(parent, from_=lo, to=hi, orient="horizontal",
@@ -74,7 +77,13 @@ class SliderRow:
             return "-"
 
     def _on_move(self, _evt=None):
+        # 先刷新数值回显，再交给外部回调 —— 否则外部覆盖 command 后数字就不动了
         self.value_lbl.configure(text=self._text())
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:
+                pass
 
     def refresh(self):
         self.value_lbl.configure(text=self._text())
@@ -181,18 +190,23 @@ class App(tk.Tk):
     def _build_vars(self):
         # --- 打印 ---
         self.v_mode = tk.StringVar(value="mono_laser")
+        self.v_papertype = tk.StringVar(value=PRINT_PAPER_TYPES["plain"])
         self.v_density = tk.DoubleVar(value=1.00)
         self.v_pcontrast = tk.DoubleVar(value=1.00)
         self.v_spread = tk.DoubleVar(value=0.35)
         self.v_grain = tk.DoubleVar(value=0.30)
+        self.v_fog = tk.DoubleVar(value=0.10)
         self.v_halftone = tk.DoubleVar(value=0.25)
         self.v_misreg = tk.DoubleVar(value=0.50)
         self.v_tac = tk.DoubleVar(value=280)
 
         # --- 扫描 ---
+        self.v_pvary = tk.StringVar(value=PAGE_VARIATIONS["uniform"])
         self.v_paperbase = tk.DoubleVar(value=246)
         self.v_cloud = tk.DoubleVar(value=0.35)
         self.v_noise = tk.DoubleVar(value=0.30)
+        self.v_dust = tk.DoubleVar(value=0.20)
+        self.v_streak = tk.DoubleVar(value=0.0)
         self.v_blur = tk.DoubleVar(value=0.45)
         self.v_scontrast = tk.DoubleVar(value=1.07)
         self.v_bright = tk.DoubleVar(value=1.00)
@@ -392,6 +406,22 @@ class App(tk.Tk):
                   ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, PAD))
         r += 1
 
+        ttk.Label(p, text="纸张类型", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        self.cb_papertype = ttk.Combobox(
+            p, textvariable=self.v_papertype, state="readonly", width=26,
+            values=[PRINT_PAPER_TYPES[k] for k in PRINT_PAPER_TYPES])
+        self.cb_papertype.grid(row=r, column=1, sticky="w", pady=2)
+        _Tooltip(self.cb_papertype,
+                 "同一种墨印在不同纸上差别很大：\n"
+                 "· 铜版/涂布纸表面光滑，墨点被「封」在表面 → 扩散小、颗粒细、字口实\n"
+                 "· 再生纸/草纸纤维粗长 → 毛细渗透严重、掉粉多、边缘发毛\n"
+                 "这一项会同时影响墨点扩散与颗粒感两项的实际强度。")
+        r += 1
+        ttk.Label(p, style="Hint.TLabel", wraplength=400, justify="left",
+                  text="纸张只改变「墨在纸上怎么散」，不改变打印机的墨量。"
+                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, PAD))
+        r += 1
+
         ttk.Separator(p, orient="horizontal").grid(row=r, column=0, columnspan=3,
                                                    sticky="ew", pady=PAD)
         r += 1
@@ -402,9 +432,15 @@ class App(tk.Tk):
             ("阶调对比", self.v_pcontrast, 0.70, 1.40, "{:.2f}",
              "打印机成像的对比度，越大明暗拉得越开。"),
             ("墨点扩散", self.v_spread, 0.00, 1.00, "{:.2f}",
-             "油墨在纸纤维上的毛细渗透程度。越大越糊，边缘越软。"),
+             "油墨在纸纤维上的毛细渗透程度。越大越糊，边缘越软。\n"
+             "实际强度还会乘上「纸张类型」的扩散系数。"),
             ("颗粒感", self.v_grain, 0.00, 1.00, "{:.2f}",
-             "碳粉/墨滴转印的随机性，产生颗粒噪声与偶发脏点。"),
+             "碳粉/墨滴转印的随机性，产生颗粒噪声与偶发掉粉脏点。\n"
+             "实际强度还会乘上「纸张类型」的颗粒系数。"),
+            ("底灰（白底浮墨）", self.v_fog, 0.00, 1.00, "{:.2f}",
+             "定影不净 / 四色版留底时，白纸会浮一层极淡的墨雾。\n"
+             "幅度很小（最多 3 个灰阶），但这一层「不干净的白」是真实感的关键。\n"
+             "调成 0 会得到一张过于纯净的纸，反而不像打印出来的。"),
             ("半色调网点", self.v_halftone, 0.00, 1.00, "{:.2f}",
              "打印机用网点表现灰阶。中间调会出现网点纹理。"),
         ]
@@ -418,16 +454,46 @@ class App(tk.Tk):
         ttk.Label(p, text="仅彩色引擎生效", style="Hint.TLabel").grid(
             row=r, column=1, sticky="w")
         r += 1
-        self._add_slider(p, r, "四色套印不准", self.v_misreg, 0.0, 1.0, "{:.2f}",
-                         "CMYK 四个色版对位偏差，产生彩边。灰度化后边缘会发虚、发脏。")
+        self.sl_misreg = self._add_slider(
+            p, r, "四色套印不准", self.v_misreg, 0.0, 1.0, "{:.2f}",
+            "CMYK 四个色版对位偏差，产生彩边。灰度化后边缘会发虚、发脏。")
         r += 1
-        self._add_slider(p, r, "总墨量上限 (%)", self.v_tac, 150, 360, "{:.0f}",
-                         "四色叠印的总覆盖率上限。越低暗部越糊、越闷。常见值 240~300。")
+        self.sl_tac = self._add_slider(
+            p, r, "总墨量上限 (%)", self.v_tac, 150, 360, "{:.0f}",
+            "四色叠印的总覆盖率上限。越低暗部越糊、越闷。常见值 240~300。")
         r += 1
+        self._on_mode_change()
 
     def _build_scan_tab(self, p):
         p.columnconfigure(1, weight=1)
         r = 0
+
+        # ---- 页面间一致性（放在最前：这是「输出好不好看」的第一决定项）----
+        ttk.Label(p, text="页面间效果", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        self.cb_vary = ttk.Combobox(
+            p, textvariable=self.v_pvary, state="readonly", width=26,
+            values=[PAGE_VARIATIONS[k] for k in PAGE_VARIATIONS])
+        self.cb_vary.grid(row=r, column=1, sticky="w", pady=2)
+        _Tooltip(self.cb_vary,
+                 "真实的一叠扫描件来自同一批纸、同一次过机：\n"
+                 "纸底纹理、传感器噪点、偏色方向、灰尘位置几乎完全一样，\n"
+                 "只有进纸歪斜会有几十分之一度的差别。\n\n"
+                 "整份统一：所有页面共用同一套纸张/传感器指纹，只有倾斜角可能微抖。\n"
+                 "　　　　　这是绝大多数场合的正确选择，输出文件翻页时观感一致。\n"
+                 "仅倾斜微抖：纹理仍然统一，但每页的进纸角度不同。\n"
+                 "逐页随机：每页都重新抽纹理与偏色，翻页像十几份不同扫描件，\n"
+                 "　　　　　只在刻意要「杂乱旧档」的感觉时才用。")
+        r += 1
+        ttk.Label(p, style="Hint.TLabel", wraplength=400, justify="left",
+                  text="默认整份统一 —— 同一份 PDF 的每一页共用一套纸张与传感器指纹，"
+                       "翻页时不会忽明忽暗、忽左歪忽右歪。"
+                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, PAD))
+        r += 1
+
+        ttk.Separator(p, orient="horizontal").grid(row=r, column=0, columnspan=3,
+                                                   sticky="ew", pady=PAD)
+        r += 1
+
         ttk.Label(p, style="Hint.TLabel", wraplength=400, justify="left",
                   text="模拟扫描仪把打印件读回来的过程：纸底反射率 × 墨迹反射率，"
                        "再叠加光学模糊、传感器噪点、进纸倾斜与边缘照度衰减。"
@@ -440,7 +506,15 @@ class App(tk.Tk):
             ("纸底不均匀度", self.v_cloud, 0.0, 1.0, "{:.2f}",
              "纸张定量不匀 + 扫描灯管不均造成的底色起伏。调大会有「脏底」感。"),
             ("传感器噪点", self.v_noise, 0.0, 1.0, "{:.2f}",
-             "暗部信噪比差，噪声集中在深色区域；另含少量灰尘椒盐点。"),
+             "暗部信噪比差，噪声集中在深色区域，白纸几乎干净。"),
+            ("灰尘 / 污渍", self.v_dust, 0.0, 1.0, "{:.2f}",
+             "成块的斑点，不是逐像素抖动：纸面粉尘、复印机鼓面残留、\n"
+             "盖板玻璃上的毛屑。斑点大小按物理尺寸算，与分辨率无关。\n"
+             "这是「旧」的主要来源，但也是「脏」的主要来源，默认值刻意压低。"),
+            ("纵向条纹", self.v_streak, 0.0, 1.0, "{:.2f}",
+             "CIS/CCD 传感器逐列增益标定不均、走纸划痕、灯管脏污。\n"
+             "老式扫描仪最典型的毛病，条纹方向永远是走纸方向（竖直）。\n"
+             "默认 0（干净），需要「旧机器味」时再调大。"),
             ("光学模糊", self.v_blur, 0.0, 2.0, "{:.2f}",
              "镜头景深、走纸运动模糊。>1.2 会追加方向性模糊。"),
             ("扫描对比度", self.v_scontrast, 0.80, 1.45, "{:.2f}",
@@ -465,7 +539,8 @@ class App(tk.Tk):
         r += 1
         self.sl_skew_amt = self._add_slider(p, r, "随机倾斜幅度 (°)", self.v_skew_amt,
                                             0.0, 2.0, "{:.2f}",
-                                            "每页在 ±该幅度内随机倾斜，模拟进纸不齐。")
+                                            "每页在 ±该幅度内随机倾斜，模拟进纸不齐。\n"
+                                            "页面间效果为「整份统一」时，整份共用一个角度。")
         r += 1
         self._on_skew_toggle()
 
@@ -690,7 +765,13 @@ class App(tk.Tk):
         self.sl_skew_amt.scale.configure(state="normal" if random_on else "disabled")
 
     def _on_mode_change(self):
-        pass  # 彩色参数对黑白模式无效，但保留数值，切换回来不丢
+        """彩色参数对黑白引擎无效：灰掉滑块但保留数值，切回彩色不丢"""
+        mono = self.v_mode.get() == "mono_laser"
+        state = "disabled" if mono else "normal"
+        for attr in ("sl_misreg", "sl_tac"):
+            s = getattr(self, attr, None)
+            if s is not None:
+                s.scale.configure(state=state)
 
     def _on_paper_change(self):
         key = self._paper_key()
@@ -705,6 +786,20 @@ class App(tk.Tk):
             if paper.PAPER_LABELS[k] == cur:
                 return k
         return cur if cur in paper.PAPER_ORDER else "A4"
+
+    def _papertype_key(self) -> str:
+        cur = self.v_papertype.get()
+        for k, v in PRINT_PAPER_TYPES.items():
+            if v == cur:
+                return k
+        return cur if cur in PRINT_PAPER_TYPES else "plain"
+
+    def _pvary_key(self) -> str:
+        cur = self.v_pvary.get()
+        for k, v in PAGE_VARIATIONS.items():
+            if v == cur:
+                return k
+        return cur if cur in PAGE_VARIATIONS else "uniform"
 
     def _sync_format(self):
         cur = self.v_format.get()
@@ -741,8 +836,12 @@ class App(tk.Tk):
 
         if "mode" in pr:
             self.v_mode.set(pr["mode"])
+        if "paper_type" in pr:
+            self.v_papertype.set(PRINT_PAPER_TYPES.get(pr["paper_type"],
+                                                       self.v_papertype.get()))
         for key, var in (("density", self.v_density), ("contrast", self.v_pcontrast),
                          ("spread", self.v_spread), ("grain", self.v_grain),
+                         ("fog", self.v_fog),
                          ("halftone", self.v_halftone), ("misregister", self.v_misreg),
                          ("tac_limit", self.v_tac)):
             if key in pr:
@@ -750,13 +849,17 @@ class App(tk.Tk):
 
         mapping = {
             "paper_base": self.v_paperbase, "paper_cloud": self.v_cloud,
-            "noise": self.v_noise, "blur": self.v_blur, "contrast": self.v_scontrast,
+            "noise": self.v_noise, "dust": self.v_dust, "streak": self.v_streak,
+            "blur": self.v_blur, "contrast": self.v_scontrast,
             "brightness": self.v_bright, "vignette": self.v_vignette,
             "jpeg_quality": self.v_jpegq, "binary_threshold": self.v_threshold,
         }
         for key, var in mapping.items():
             if key in sc:
                 var.set(sc[key])
+        if "page_variation" in sc:
+            self.v_pvary.set(PAGE_VARIATIONS.get(sc["page_variation"],
+                                                 self.v_pvary.get()))
         if "out_mode" in sc:
             self.v_scanmode.set(sc["out_mode"])
 
@@ -772,6 +875,9 @@ class App(tk.Tk):
         for s in self._sliders:
             s.refresh()
         self._on_paper_change()
+        self._on_mode_change()
+        self._on_scanmode_change()
+        self._on_skew_toggle()
         self.v_status.set(f"已应用预设：{name}")
         log.info("应用预设: %s", name)
 
@@ -782,6 +888,10 @@ class App(tk.Tk):
             filetypes=[("PDF 文件", "*.pdf"), ("所有文件", "*.*")])
         if not paths:
             return
+        self.add_paths(paths)
+
+    def add_paths(self, paths):
+        """把一批路径加进列表（对话框之外也能调用，便于测试/拖放）"""
         added = 0
         for p in paths:
             pth = Path(p)
@@ -801,6 +911,7 @@ class App(tk.Tk):
         self._refresh_count()
         self.v_status.set(f"已添加 {added} 个文件")
         log.info("添加文件 %d 个，列表共 %d 个", added, len(self.files))
+        return added
 
     def remove_selected(self):
         sel = list(self.tree.selection())
@@ -912,10 +1023,12 @@ class App(tk.Tk):
 
         pp = PrintParams(
             mode=self.v_mode.get(),
+            paper_type=self._papertype_key(),
             density=round(self.v_density.get(), 3),
             contrast=round(self.v_pcontrast.get(), 3),
             spread=round(self.v_spread.get(), 3),
             grain=round(self.v_grain.get(), 3),
+            fog=round(self.v_fog.get(), 3),
             halftone=round(self.v_halftone.get(), 3),
             misregister=round(self.v_misreg.get(), 3),
             tac_limit=round(self.v_tac.get(), 1),
@@ -929,9 +1042,12 @@ class App(tk.Tk):
             skew_rand = 0.0
 
         sp = ScanParams(
+            page_variation=self._pvary_key(),
             paper_base=round(self.v_paperbase.get(), 1),
             paper_cloud=round(self.v_cloud.get(), 3),
             noise=round(self.v_noise.get(), 3),
+            dust=round(self.v_dust.get(), 3),
+            streak=round(self.v_streak.get(), 3),
             blur=round(self.v_blur.get(), 3),
             contrast=round(self.v_scontrast.get(), 3),
             brightness=round(self.v_bright.get(), 3),
@@ -1313,17 +1429,22 @@ class App(tk.Tk):
     def _apply_job_to_ui(self, job: RenderJob):
         pp, sp, lp, op = job.print_params, job.scan_params, job.layout_params, job.output_params
         self.v_mode.set(pp.mode)
+        self.v_papertype.set(PRINT_PAPER_TYPES.get(pp.paper_type, self.v_papertype.get()))
         self.v_density.set(pp.density)
         self.v_pcontrast.set(pp.contrast)
         self.v_spread.set(pp.spread)
         self.v_grain.set(pp.grain)
+        self.v_fog.set(pp.fog)
         self.v_halftone.set(pp.halftone)
         self.v_misreg.set(pp.misregister)
         self.v_tac.set(pp.tac_limit)
 
+        self.v_pvary.set(PAGE_VARIATIONS.get(sp.page_variation, self.v_pvary.get()))
         self.v_paperbase.set(sp.paper_base)
         self.v_cloud.set(sp.paper_cloud)
         self.v_noise.set(sp.noise)
+        self.v_dust.set(sp.dust)
+        self.v_streak.set(sp.streak)
         self.v_blur.set(sp.blur)
         self.v_scontrast.set(sp.contrast)
         self.v_bright.set(sp.brightness)
@@ -1365,6 +1486,8 @@ class App(tk.Tk):
             s.refresh()
         self._on_paper_change()
         self._on_skew_toggle()
+        self._on_mode_change()
+        self._on_scanmode_change()
         self._sync_format()
 
     def _on_close(self):
@@ -1439,35 +1562,61 @@ class PreviewWindow(tk.Toplevel):
     """
     效果预览 + 实时调参。
 
-    左侧是扫描侧参数的实时滑块 —— 拖动的瞬间预览图就跟着变，
-    不用反复「改参数 → 关窗 → 重开 → 再看」。
-    调满意了点「应用到主界面」，三个核心参数（模糊度 / 噪点 / 倾斜度）
-    连同其他扫描参数一并写回主窗口，直接用于正式处理。
+    左侧是一个 Notebook，三页分别对应主界面的**打印效果 / 扫描效果 / 版式与输出**。
+    拖动任意滑块，预览图立刻跟着变，不用「改参数 → 关窗 → 重开 → 再看」。
+    调满意了点「应用到主界面」，三页参数一并写回主窗口。
 
-    性能做法见 engine.PreviewSession：渲染与打印只算一次，每次只重跑扫描阶段，
-    并且整个会话用固定随机种子，保证拖动滑块时噪点图案不会乱跳。
-    拖动过程中先出一张低分辨率快图（QUICK_SCALE），停手 0.5 秒后自动精修。
+    三级重算（见 engine.PreviewSession）：
+        · 只改扫描参数 → 只重跑扫描阶段（最快，滑动时近乎实时）
+        · 改打印参数   → 只重跑打印阶段（排版结果已缓存）
+        · 改版式 / 渲染分辨率 → 重建会话（纸张尺寸变了，排版结果作废）
+    整个会话用固定随机种子，拖动滑块时噪点图案不会乱跳；
+    拖动过程中先出低分辨率快图（QUICK_SCALE），停手 0.5 秒后自动精修。
     """
 
     QUICK_SCALE = 0.60        # 拖动时的快速预览倍率
 
+    # 这些字段是整数（滑块给的是 float）
+    INT_FIELDS = {"jpeg_quality", "binary_threshold", "tac_limit"}
+    LEVEL_ORDER = {"scan": 0, "print": 1, "rebuild": 2}
+
     def __init__(self, master: "App", src: Path, job: RenderJob, page_index: int = 0):
         super().__init__(master)
         self.app = master
-        self.src = src
+        self.src = Path(src)
         self.job = job
         self.page_index = page_index
 
-        self.title(f"效果预览 · 实时调参 —— {src.name}")
-        self.geometry("1240x900")
-        self.minsize(1000, 720)
+        self.title(f"效果预览 · 实时调参 —— {self.src.name}")
+        self.geometry("1330x930")
+        self.minsize(1080, 740)
         self.transient(master)
 
-        # ---- 本地可变参数（复制一份，不直接改主界面）----
+        # ---- 本地可变参数（各复制一份，不直接改主界面）----
+        self.pp = PrintParams(**vars(job.print_params))
         self.sp = ScanParams(**vars(job.scan_params))
+        self.lp = LayoutParams(**vars(job.layout_params))
+        self.op = OutputParams(**vars(job.output_params))
+
         self.skew_random = tk.BooleanVar(value=(self.sp.skew_deg is None))
         if self.sp.skew_deg is None:
             self.sp.skew_deg = 0.0
+
+        # ---- 下拉框 / 单选按钮绑定的变量 ----
+        self.pmode = tk.StringVar(value=self.pp.mode)
+        self.papertype = tk.StringVar(
+            value=PRINT_PAPER_TYPES.get(self.pp.paper_type, PRINT_PAPER_TYPES["plain"]))
+        self.scanmode = tk.StringVar(value=self.sp.out_mode)
+        self.pvary = tk.StringVar(
+            value=PAGE_VARIATIONS.get(self.sp.page_variation, PAGE_VARIATIONS["uniform"]))
+        self.papervar = tk.StringVar(
+            value=paper.PAPER_LABELS.get(self.lp.paper, self.lp.paper))
+        self.orientvar = tk.StringVar(value=self.lp.orientation)
+        self.scalevar = tk.StringVar(
+            value=SCALE_MODES.get(self.lp.scale_mode, SCALE_MODES["fit"]))
+        self.rendervar = tk.StringVar(value=str(self.op.render_dpi))
+        self.cwvar = tk.StringVar(value=f"{self.lp.custom_w_mm:g}")
+        self.chvar = tk.StringVar(value=f"{self.lp.custom_h_mm:g}")
 
         # ---- 线程与请求队列 ----
         self.jobs: queue.Queue = queue.Queue()
@@ -1475,13 +1624,17 @@ class PreviewWindow(tk.Toplevel):
         self.session: engine.PreviewSession | None = None
         self.token = 0
         self.shown_token = -1
-        self.last_image = None            # 原始 PIL 灰度图（用于保存）
+        self.last_image = None            # 最近一帧扫描结果（用于保存）
         self.last_cost = 0.0
         self.last_scale = 1.0
+        self._pending_level = "scan"      # scan < print < rebuild
+        self._ready = False               # 首次会话构建完成前不接受渲染请求
         self._debounce_id = None
         self._quality_id = None
         self._resize_id = None
         self._closing = False
+        self._p_sliders: list[tuple[str, str, SliderRow]] = []
+        self._by_field: dict[str, SliderRow] = {}
 
         self._build_ui()
         self._start_worker()
@@ -1489,7 +1642,7 @@ class PreviewWindow(tk.Toplevel):
 
         # 初始化：后台构建预览会话
         self._status("正在准备预览…")
-        self.jobs.put(("init", self.page_index, 0))
+        self.jobs.put(("init", self.page_index, 0, self._make_job()))
         self.after(50, self._poll)
 
     # ------------------------------------------------------------------ UI
@@ -1497,10 +1650,9 @@ class PreviewWindow(tk.Toplevel):
         outer = ttk.Frame(self, padding=PAD)
         outer.pack(fill="both", expand=True)
 
-        # 左栏可滚动：参数较多，固定高度会把底部按钮挤出可视区
-        self.scroll = ScrollFrame(outer, width=322)
-        self.scroll.pack(side="left", fill="y", padx=(0, PAD))
-        left = self.scroll.inner
+        left = ttk.Frame(outer, width=392)
+        left.pack(side="left", fill="y", padx=(0, PAD))
+        left.pack_propagate(False)
         right = ttk.Frame(outer)
         right.pack(side="left", fill="both", expand=True)
 
@@ -1512,92 +1664,271 @@ class PreviewWindow(tk.Toplevel):
         info = ttk.Labelframe(parent, text=" 当前设置 ", padding=PAD)
         info.pack(fill="x")
         self.lbl_info = ttk.Label(info, style="Hint.TLabel", justify="left",
-                                  text="加载中…", wraplength=290)
+                                  text="加载中…", wraplength=350)
         self.lbl_info.pack(anchor="w")
 
-        # ---- 核心调试：模糊度 / 噪点 / 倾斜度 ----
-        core = ttk.Labelframe(parent, text=" 核心调试（拖动即时生效） ", padding=PAD)
-        core.pack(fill="x", pady=(PAD, 0))
-        core.columnconfigure(1, weight=1)
-        self._p_sliders: dict[str, SliderRow] = {}
+        # ---- 三个参数页，与主界面一一对应 ----
+        nb = ttk.Notebook(parent)
+        nb.pack(fill="both", expand=True, pady=(PAD, 0))
+        self.nb = nb
 
-        r = 0
-        self._p_slider(core, r, "blur", "模糊度", 0.0, 2.0, "{:.2f}"); r += 1
-        ttk.Label(core, style="Hint.TLabel", wraplength=290, justify="left",
-                  text="扫描镜头景深与走纸运动模糊。越大越糊，>1.2 会带方向性拖影。"
-                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, PAD)); r += 1
+        t1 = ScrollFrame(nb, width=360)
+        t2 = ScrollFrame(nb, width=360)
+        t3 = ScrollFrame(nb, width=360)
+        nb.add(t1, text="  打印效果  ")
+        nb.add(t2, text="  扫描效果  ")
+        nb.add(t3, text="  版式与输出  ")
 
-        self._p_slider(core, r, "noise", "噪点", 0.0, 1.0, "{:.2f}"); r += 1
-        ttk.Label(core, style="Hint.TLabel", wraplength=290, justify="left",
-                  text="传感器噪声，集中在深色区域；另含灰尘椒盐点。"
-                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, PAD)); r += 1
-
-        ttk.Checkbutton(core, text="倾斜度随机生成（每页不同）",
-                        variable=self.skew_random,
-                        command=self._on_skew_toggle).grid(
-            row=r, column=0, columnspan=3, sticky="w"); r += 1
-        self.sl_skew = self._p_slider(core, r, "skew_deg", "倾斜度 (°)", -2.0, 2.0,
-                                      "{:+.2f}"); r += 1
-        ttk.Label(core, style="Hint.TLabel", wraplength=290, justify="left",
-                  text="进纸歪斜。取消勾选后拖动滑块，可精确调到想要的角度。"
-                  ).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
-
-        ttk.Label(core, style="Hint.TLabel", wraplength=290, justify="left",
-                  text="模糊度、噪点强度、倾斜角度与最终输出一致（已做 DPI 补偿）；\n"
-                       "颗粒与网点的纹理粗细受预览分辨率限制，会与最终输出略有差异。"
-                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(PAD, 0)); r += 1
-
-        # ---- 扫描色彩（决定出的是灰的、黑白的还是彩色的）----
-        col = ttk.Labelframe(parent, text=" 扫描色彩 ", padding=PAD)
-        col.pack(fill="x", pady=(PAD, 0))
-        self.scanmode = tk.StringVar(value=self.sp.out_mode)
-        # 单选按钮放独立子框并横向排布；说明文字另起一行。
-        # 若把 side="left" 的按钮和说明标签直接 pack 进同一个容器，
-        # 标签会被挤到按钮右侧同一行，文字会和按钮重叠（窄面板下尤其明显）。
-        row = ttk.Frame(col)
-        row.pack(fill="x", anchor="w")
-        ttk.Radiobutton(row, text="灰度", value="gray",
-                        variable=self.scanmode,
-                        command=self._on_scanmode).pack(side="left")
-        ttk.Radiobutton(row, text="黑白二值", value="binary",
-                        variable=self.scanmode,
-                        command=self._on_scanmode).pack(side="left", padx=(PAD, 0))
-        ttk.Radiobutton(row, text="彩色", value="color",
-                        variable=self.scanmode,
-                        command=self._on_scanmode).pack(side="left", padx=(PAD, 0))
-        ttk.Label(col, style="Hint.TLabel", wraplength=280, justify="left",
-                  text="灰度/二值：扫描仪按亮度采样，彩色内容会变成不同的灰。\n"
-                       "彩色：保留颜色输出 RGB（打印引擎也需是彩色；\n"
-                       "黑白打印机的灰墨扫出来依然接近中性灰）。"
-                  ).pack(anchor="w", pady=(4, 0))
-
-        # ---- 其他扫描参数 ----
-        more = ttk.Labelframe(parent, text=" 其他扫描参数 ", padding=PAD)
-        more.pack(fill="both", expand=True, pady=(PAD, 0))
-        more.columnconfigure(1, weight=1)
-        r = 0
-        self._p_slider(more, r, "paper_base", "纸底灰度", 215, 255, "{:.0f}"); r += 1
-        self._p_slider(more, r, "paper_cloud", "纸底不均匀", 0.0, 1.0, "{:.2f}"); r += 1
-        self._p_slider(more, r, "contrast", "扫描对比度", 0.80, 1.45, "{:.2f}"); r += 1
-        self._p_slider(more, r, "brightness", "亮度", 0.85, 1.15, "{:.2f}"); r += 1
-        self._p_slider(more, r, "vignette", "边缘暗角", 0.0, 1.0, "{:.2f}"); r += 1
-        self._p_slider(more, r, "jpeg_quality", "JPEG 质量", 25, 100, "{:.0f}"); r += 1
-        self.sl_p_thr = self._p_slider(more, r, "binary_threshold", "二值化阈值",
-                                       60, 235, "{:.0f}"); r += 1
-        self._p_slider(more, r, "paper_warmth", "纸张暖调", 0.0, 1.0, "{:.2f}"); r += 1
-        self._p_slider(more, r, "color_cast", "白平衡偏差", 0.0, 1.0, "{:.2f}"); r += 1
-        self._p_slider(more, r, "sat_boost", "饱和度增益", 0.5, 1.6, "{:.2f}"); r += 1
-
-        self._on_skew_toggle()
-        self._on_scanmode()
+        self._build_p_print(t1.inner)
+        self._build_p_scan(t2.inner)
+        self._build_p_layout(t3.inner)
 
         # ---- 按钮 ----
         btns = ttk.Frame(parent)
         btns.pack(fill="x", pady=(PAD, 0))
         ttk.Button(btns, text="应用到主界面", command=self._apply_to_main).pack(fill="x")
-        ttk.Button(btns, text="恢复初始参数", command=self._reset).pack(fill="x", pady=(4, 0))
-        ttk.Button(btns, text="保存预览图…", command=self._save).pack(fill="x", pady=(4, 0))
-        ttk.Button(btns, text="关闭", command=self._on_close).pack(fill="x", pady=(10, 0))
+        row = ttk.Frame(btns)
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Button(row, text="恢复初始参数", command=self._reset).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row, text="保存预览图…", command=self._save).pack(
+            side="left", fill="x", expand=True, padx=(4, 0))
+        ttk.Button(btns, text="关闭", command=self._on_close).pack(fill="x", pady=(6, 0))
+
+    # ---- 打印效果页 ----
+    def _build_p_print(self, p):
+        p.columnconfigure(1, weight=1)
+        r = 0
+
+        ttk.Label(p, text="打印引擎", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        box = ttk.Frame(p)
+        box.grid(row=r, column=1, columnspan=2, sticky="ew", pady=2)
+        for key, label in PRINT_MODES.items():
+            ttk.Radiobutton(box, text=label, value=key, variable=self.pmode,
+                            command=self._on_pmode).pack(anchor="w")
+        r += 1
+
+        ttk.Label(p, text="纸张类型", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        cb = ttk.Combobox(p, textvariable=self.papertype, state="readonly", width=24,
+                          values=[PRINT_PAPER_TYPES[k] for k in PRINT_PAPER_TYPES])
+        cb.grid(row=r, column=1, sticky="w", pady=2)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._on_change("print"))
+        _Tooltip(cb, "同一种墨印在不同纸上差别很大：\n"
+                     "· 涂布纸表面光滑，墨被「封」在表面 → 扩散小、颗粒细\n"
+                     "· 再生纸纤维粗长 → 渗透严重、掉粉多、边缘发毛\n"
+                     "这一项会同时乘到「墨点扩散」与「颗粒感」上。")
+        r += 1
+        ttk.Label(p, style="Hint.TLabel", wraplength=350, justify="left",
+                  text="纸张只改变墨在纸上怎么散，不改变打印机的墨量。"
+                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, PAD))
+        r += 1
+
+        ttk.Separator(p, orient="horizontal").grid(row=r, column=0, columnspan=3,
+                                                   sticky="ew", pady=PAD)
+        r += 1
+
+        for label, field, lo, hi, fmt, tip in [
+            ("浓度", "density", 0.60, 1.45, "{:.2f}",
+             "碳粉/墨量。越大越黑越实。"),
+            ("阶调对比", "contrast", 0.70, 1.40, "{:.2f}",
+             "打印机成像对比度。"),
+            ("墨点扩散", "spread", 0.0, 1.0, "{:.2f}",
+             "毛细渗透程度，越大边缘越软越糊。\n实际强度再乘纸张扩散系数。"),
+            ("颗粒感", "grain", 0.0, 1.0, "{:.2f}",
+             "转印随机性：颗粒噪声 + 偶发掉粉。"),
+            ("底灰", "fog", 0.0, 1.0, "{:.2f}",
+             "白底浮墨。幅度很小（最多 3 个灰阶），\n但没有它白纸会「太干净」，不像打印出来的。"),
+            ("半色调网点", "halftone", 0.0, 1.0, "{:.2f}",
+             "中间调的网点纹理。"),
+        ]:
+            self._p_slider(p, r, "print", field, label, lo, hi, fmt, tip)
+            r += 1
+
+        ttk.Separator(p, orient="horizontal").grid(row=r, column=0, columnspan=3,
+                                                   sticky="ew", pady=PAD)
+        r += 1
+        ttk.Label(p, text="仅彩色引擎生效", style="Hint.TLabel").grid(
+            row=r, column=1, sticky="w")
+        r += 1
+        self._p_slider(p, r, "print", "misregister", "四色套印不准", 0.0, 1.0, "{:.2f}",
+                       "CMYK 四版对位偏差，产生彩边。\n灰度化后边缘会发虚。")
+        r += 1
+        self._p_slider(p, r, "print", "tac_limit", "总墨量上限 (%)", 150, 360, "{:.0f}",
+                       "四色叠印总覆盖率上限。越低暗部越闷。常见 240~300。")
+        r += 1
+        self._on_pmode()
+
+    # ---- 扫描效果页 ----
+    def _build_p_scan(self, p):
+        p.columnconfigure(1, weight=1)
+        r = 0
+
+        ttk.Label(p, text="页面间效果", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        cb = ttk.Combobox(p, textvariable=self.pvary, state="readonly", width=24,
+                          values=[PAGE_VARIATIONS[k] for k in PAGE_VARIATIONS])
+        cb.grid(row=r, column=1, sticky="w", pady=2)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._on_change("scan"))
+        _Tooltip(cb, "整份统一：所有页面共用同一套纸张/传感器指纹，\n"
+                     "只有倾斜角可能微抖。这是绝大多数场合的正确选择。\n"
+                     "仅倾斜微抖：纹理统一，每页进纸角度不同。\n"
+                     "逐页随机：每页重抽纹理与偏色，翻页像十几份不同扫描件。\n\n"
+                     "提示：这里只影响**当前这一页**的显示；\n"
+                     "翻页后可以看到同一套指纹在别的页上的样子。")
+        r += 1
+        ttk.Label(p, style="Hint.TLabel", wraplength=350, justify="left",
+                  text="默认整份统一，翻页时不会忽明忽暗、忽左歪忽右歪。"
+                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, PAD))
+        r += 1
+
+        ttk.Separator(p, orient="horizontal").grid(row=r, column=0, columnspan=3,
+                                                   sticky="ew", pady=PAD)
+        r += 1
+
+        for label, field, lo, hi, fmt, tip in [
+            ("纸底灰度", "paper_base", 215, 255, "{:.0f}",
+             "纸基不是纯白。实际扫描件多在 240~250。"),
+            ("纸底不均匀", "paper_cloud", 0.0, 1.0, "{:.2f}",
+             "纸张定量不匀 + 灯管不均造成的底色起伏。"),
+            ("传感器噪点", "noise", 0.0, 1.0, "{:.2f}",
+             "暗部信噪比差，噪声集中在深色区域。"),
+            ("灰尘 / 污渍", "dust", 0.0, 1.0, "{:.2f}",
+             "成块斑点：纸面粉尘、鼓面残留、玻璃毛屑。\n斑点大小按物理尺寸算，与分辨率无关。"),
+            ("纵向条纹", "streak", 0.0, 1.0, "{:.2f}",
+             "传感器逐列增益不均、走纸划痕。老扫描仪最典型的毛病。"),
+            ("光学模糊", "blur", 0.0, 2.0, "{:.2f}",
+             "景深 + 走纸运动模糊。>1.2 带方向性拖影。"),
+            ("扫描对比度", "contrast", 0.80, 1.45, "{:.2f}",
+             "自动曝光的阶调拉伸。"),
+            ("亮度", "brightness", 0.85, 1.15, "{:.2f}", "整体亮度增益。"),
+            ("边缘暗角", "vignette", 0.0, 1.0, "{:.2f}",
+             "边缘照度衰减 + 单侧盖板阴影。"),
+            ("JPEG 质量", "jpeg_quality", 25, 100, "{:.0f}",
+             "越低块效应越明显。二值模式自动改用无损 PNG。"),
+        ]:
+            self._p_slider(p, r, "scan", field, label, lo, hi, fmt, tip)
+            r += 1
+
+        ttk.Separator(p, orient="horizontal").grid(row=r, column=0, columnspan=3,
+                                                   sticky="ew", pady=PAD)
+        r += 1
+
+        ttk.Checkbutton(p, text="倾斜角度随机生成（每页不同）",
+                        variable=self.skew_random,
+                        command=self._on_skew_toggle).grid(
+            row=r, column=0, columnspan=3, sticky="w"); r += 1
+        self.sl_skew = self._p_slider(p, r, "scan", "skew_deg", "倾斜角 (°)",
+                                      -2.0, 2.0, "{:+.2f}",
+                                      "进纸歪斜。正数顺时针，负数逆时针。")
+        r += 1
+        self.sl_skew_amt = self._p_slider(p, r, "scan", "skew_random", "随机倾斜幅度 (°)",
+                                          0.0, 2.0, "{:.2f}",
+                                          "每页在 ±该幅度内随机倾斜。\n"
+                                          "页面间效果为「整份统一」时整份共用一个角度。")
+        r += 1
+
+        ttk.Separator(p, orient="horizontal").grid(row=r, column=0, columnspan=3,
+                                                   sticky="ew", pady=PAD)
+        r += 1
+
+        # ---- 扫描色彩 ----
+        ttk.Label(p, text="扫描色彩", anchor="w").grid(row=r, column=0, sticky="w")
+        crow = ttk.Frame(p)
+        crow.grid(row=r, column=1, columnspan=2, sticky="w")
+        for text, val in (("灰度", "gray"), ("二值", "binary"), ("彩色", "color")):
+            ttk.Radiobutton(crow, text=text, value=val, variable=self.scanmode,
+                            command=self._on_scanmode).pack(side="left", padx=(0, PAD))
+        r += 1
+
+        self.sl_p_thr = self._p_slider(p, r, "scan", "binary_threshold", "二值化阈值",
+                                       60, 235, "{:.0f}", "只对二值模式生效。")
+        r += 1
+        for label, field, lo, hi, fmt in (
+                ("纸张暖调", "paper_warmth", 0.0, 1.0, "{:.2f}"),
+                ("白平衡偏差", "color_cast", 0.0, 1.0, "{:.2f}"),
+                ("饱和度增益", "sat_boost", 0.5, 1.6, "{:.2f}")):
+            self._p_slider(p, r, "scan", field, label, lo, hi, fmt,
+                           "只对彩色模式生效。")
+            r += 1
+
+        ttk.Label(p, style="Hint.TLabel", wraplength=350, justify="left",
+                  text="模糊、噪点、灰尘、条纹、倾斜角都已做 DPI 补偿，\n"
+                       "与最终输出一致；颗粒与网点的纹理粗细受预览分辨率限制，\n"
+                       "会与最终输出略有差异。"
+                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(PAD, 0))
+        r += 1
+
+        self._on_skew_toggle()
+        self._on_scanmode()
+
+    # ---- 版式与输出页 ----
+    def _build_p_layout(self, p):
+        p.columnconfigure(1, weight=1)
+        r = 0
+
+        ttk.Label(p, text="纸张", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        cb = ttk.Combobox(p, textvariable=self.papervar, state="readonly", width=24,
+                          values=[paper.PAPER_LABELS[k] for k in paper.PAPER_ORDER])
+        cb.grid(row=r, column=1, columnspan=2, sticky="w", pady=2)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._on_paper_change())
+        r += 1
+
+        ttk.Label(p, text="自定义尺寸", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        box = ttk.Frame(p)
+        box.grid(row=r, column=1, columnspan=2, sticky="w", pady=2)
+        self.e_cw = ttk.Entry(box, textvariable=self.cwvar, width=7)
+        self.e_cw.pack(side="left")
+        ttk.Label(box, text=" × ").pack(side="left")
+        self.e_ch = ttk.Entry(box, textvariable=self.chvar, width=7)
+        self.e_ch.pack(side="left")
+        ttk.Label(box, text=" mm", style="Hint.TLabel").pack(side="left")
+        for e in (self.e_cw, self.e_ch):
+            e.bind("<Return>", lambda _e: self._on_paper_change())
+            e.bind("<FocusOut>", lambda _e: self._on_paper_change())
+        r += 1
+
+        ttk.Label(p, text="页面方向", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        box = ttk.Frame(p)
+        box.grid(row=r, column=1, columnspan=2, sticky="w", pady=2)
+        for val, text in (("auto", "自动"), ("portrait", "纵向"), ("landscape", "横向")):
+            ttk.Radiobutton(box, text=text, value=val, variable=self.orientvar,
+                            command=lambda: self._on_change("rebuild")).pack(
+                side="left", padx=(0, PAD))
+        r += 1
+
+        ttk.Label(p, text="缩放方式", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        cb = ttk.Combobox(p, textvariable=self.scalevar, state="readonly", width=24,
+                          values=[SCALE_MODES[k] for k in SCALE_MODES])
+        cb.grid(row=r, column=1, columnspan=2, sticky="w", pady=2)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._on_change("rebuild"))
+        r += 1
+
+        ttk.Label(p, text="页边距", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        self.sl_margin = SliderRow(p, r, "mm", tk.DoubleVar(value=self.lp.margin_mm),
+                                   0.0, 30.0, "{:.1f}", width_label=12,
+                                   on_change=self._on_margin)
+        r += 1
+
+        ttk.Separator(p, orient="horizontal").grid(row=r, column=0, columnspan=3,
+                                                   sticky="ew", pady=PAD)
+        r += 1
+
+        ttk.Label(p, text="渲染分辨率", anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        cb = ttk.Combobox(p, textvariable=self.rendervar, state="readonly", width=24,
+                          values=["100", "150", "200", "300", "400"])
+        cb.grid(row=r, column=1, columnspan=2, sticky="w", pady=2)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._on_change("rebuild"))
+        _Tooltip(cb, "生成页面时的工作分辨率，决定墨点扩散、颗粒、网点这些\n"
+                     "按像素定义的量的实际精细程度。\n"
+                     "改它需要重新渲染 PDF 页，预览会重建一次（稍慢）。")
+        r += 1
+
+        ttk.Label(p, style="Hint.TLabel", wraplength=350, justify="left",
+                  text="版式与渲染分辨率只影响预览的取景与精度，不会改变主界面的输出设置；"
+                       "点「应用到主界面」才会写回。"
+                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, PAD))
+        r += 1
+
+        self._on_paper_change()
 
     def _build_right(self, parent):
         bar = ttk.Frame(parent)
@@ -1623,49 +1954,124 @@ class PreviewWindow(tk.Toplevel):
         holder.bind("<Configure>", self._on_resize)
 
         self.lbl_status = ttk.Label(parent, text="", style="Hint.TLabel",
-                                    anchor="w", wraplength=800)
+                                    anchor="w", wraplength=820)
         self.lbl_status.pack(fill="x", pady=(4, 0))
 
     # ------------------------------------------------------- 滑块工厂（本地）
-    def _p_slider(self, parent, row, field_name, label, lo, hi, fmt) -> SliderRow:
-        var = tk.DoubleVar(value=getattr(self.sp, field_name))
-        s = SliderRow(parent, row, label, var, lo, hi, fmt, width_label=14)
-        s.scale.configure(command=lambda _v, f=field_name: self._on_change(f))
-        self._p_sliders[field_name] = s
+    def _p_slider(self, parent, row, group, field_name, label, lo, hi, fmt,
+                  tip="") -> SliderRow:
+        target = self.pp if group == "print" else self.sp
+        var = tk.DoubleVar(value=getattr(target, field_name))
+        level = "print" if group == "print" else "scan"
+        s = SliderRow(parent, row, label, var, lo, hi, fmt, width_label=13, tip=tip,
+                      on_change=lambda: self._on_change(level))
+        self._p_sliders.append((group, field_name, s))
+        self._by_field[field_name] = s
         return s
 
     def _read_sliders(self):
-        for name, s in self._p_sliders.items():
+        for group, field, s in self._p_sliders:
             v = float(s.var.get())
-            if name in ("paper_base", "jpeg_quality", "binary_threshold", "skew_deg"):
-                v = round(v, 2)
+            if field in self.INT_FIELDS:
+                v = int(round(v))
+            elif field == "paper_base":
+                v = round(v, 1)
             else:
-                v = round(v, 4)
-            setattr(self.sp, name, v)
-        self.sp.skew_deg = None if self.skew_random.get() else round(self.sp.skew_deg or 0.0, 3)
+                v = round(v, 3)
+            setattr(self.pp if group == "print" else self.sp, field, v)
+        self.sp.skew_deg = None if self.skew_random.get() else round(
+            self.sp.skew_deg or 0.0, 3)
+
+    @staticmethod
+    def _key_of(mapping: dict, label: str, default: str) -> str:
+        for k, v in mapping.items():
+            if v == label:
+                return k
+        return label if label in mapping else default
+
+    def _paper_key(self) -> str:
+        cur = self.papervar.get()
+        for k in paper.PAPER_ORDER:
+            if paper.PAPER_LABELS[k] == cur:
+                return k
+        return cur if cur in paper.PAPER_ORDER else "A4"
+
+    def _make_job(self) -> RenderJob:
+        """把当前 UI 状态装配成一份完整 RenderJob（供预览会话使用）"""
+        self._read_sliders()
+        self.pp.mode = self.pmode.get()
+        self.pp.paper_type = self._key_of(PRINT_PAPER_TYPES, self.papertype.get(),
+                                          "plain")
+        self.sp.out_mode = self.scanmode.get()
+        self.sp.page_variation = self._key_of(PAGE_VARIATIONS, self.pvary.get(),
+                                             "uniform")
+        self.lp.paper = self._paper_key()
+        self.lp.orientation = self.orientvar.get()
+        self.lp.scale_mode = self._key_of(SCALE_MODES, self.scalevar.get(), "fit")
+        self.lp.margin_mm = round(float(self.sl_margin.var.get()), 2)
+        try:
+            self.lp.custom_w_mm = float(self.cwvar.get())
+        except ValueError:
+            pass
+        try:
+            self.lp.custom_h_mm = float(self.chvar.get())
+        except ValueError:
+            pass
+        try:
+            self.op.render_dpi = int(float(self.rendervar.get()))
+        except ValueError:
+            pass
+        return RenderJob(PrintParams(**vars(self.pp)), ScanParams(**vars(self.sp)),
+                         LayoutParams(**vars(self.lp)), OutputParams(**vars(self.op)),
+                         pages=self.job.pages)
+
+    # ------------------------------------------------------------ 联动
+    def _on_pmode(self):
+        """彩色参数对黑白引擎无效：灰掉但保留数值"""
+        mono = self.pmode.get() == "mono_laser"
+        state = "disabled" if mono else "normal"
+        for field in ("misregister", "tac_limit"):
+            s = self._by_field.get(field)
+            if s is not None:
+                s.scale.configure(state=state)
 
     def _on_skew_toggle(self):
-        self.sl_skew.scale.configure(state="disabled" if self.skew_random.get() else "normal")
-        self._on_change("skew_deg")
+        self.sl_skew.scale.configure(
+            state="disabled" if self.skew_random.get() else "normal")
+        self.sl_skew_amt.scale.configure(
+            state="normal" if self.skew_random.get() else "disabled")
+        self._on_change("scan")
 
     def _on_scanmode(self):
-        """预览窗口里切换扫描色彩：立即把 out_mode 应用到参数并重渲染"""
         mode = self.scanmode.get()
         self.sp.out_mode = mode
-        thr = getattr(self, "sl_p_thr", None)
+        thr = self._by_field.get("binary_threshold")
         if thr is not None:
             thr.scale.configure(state="normal" if mode == "binary" else "disabled")
-        for name in ("paper_warmth", "color_cast", "sat_boost"):
-            s = self._p_sliders.get(name)
+        for field in ("paper_warmth", "color_cast", "sat_boost"):
+            s = self._by_field.get(field)
             if s is not None:
                 s.scale.configure(state="normal" if mode == "color" else "disabled")
-        self._on_change("out_mode")
+        self._on_change("scan")
 
-    def _on_change(self, _field=None):
+    def _on_paper_change(self):
+        is_custom = self._paper_key() == "custom"
+        state = "normal" if is_custom else "disabled"
+        self.e_cw.configure(state=state)
+        self.e_ch.configure(state=state)
+        self._on_change("rebuild")
+
+    def _on_margin(self):
+        self._on_change("rebuild")
+
+    # ------------------------------------------------------------ 变更调度
+    def _on_change(self, level: str = "scan"):
         if self._closing:
             return
         self._read_sliders()
         self._show_summary()
+        if self.LEVEL_ORDER.get(level, 0) > self.LEVEL_ORDER.get(self._pending_level, 0):
+            self._pending_level = level
         self._cancel_timers()
         # 两级渲染：先出低分辨率快图保证手感，停手后再自动精修一版
         self._debounce_id = self.after(55, lambda: self._request_render(quick=True))
@@ -1686,11 +2092,16 @@ class PreviewWindow(tk.Toplevel):
             self._debounce_id = None
         else:
             self._quality_id = None
-        if self._closing or self.session is None:
+        if self._closing:
             return
+        if not self._ready:
+            return          # 首次会话还没构建完成，等 init 回来再说
         self.token += 1
         scale = self.QUICK_SCALE if quick else 1.0
-        self.jobs.put(("render", self.token, ScanParams(**vars(self.sp)), scale))
+        level = self._pending_level
+        if not quick:
+            self._pending_level = "scan"
+        self.jobs.put(("render", self.token, self._make_job(), scale, level))
 
     # ------------------------------------------------------------ 后台线程
     def _start_worker(self):
@@ -1701,49 +2112,58 @@ class PreviewWindow(tk.Toplevel):
     def _worker_loop(self):
         while True:
             try:
-                job = self.jobs.get()
+                msg = self.jobs.get()
             except Exception:
                 return
-            if job is None:
+            if msg is None:
                 return
-            kind = job[0]
+            kind = msg[0]
             if kind == "init":
-                _, page_index, token = job
+                _, page_index, token, job = msg
                 try:
-                    s = engine.PreviewSession(self.src, self.job,
-                                              page_index=page_index, max_side=1100)
+                    s = engine.PreviewSession(self.src, job, page_index=page_index,
+                                              max_side=1100)
                     self.results.put(("init", token, s, None))
                 except Exception as e:
                     log.exception("预览会话构建失败")
                     self.results.put(("init", token, None, e))
-            else:
-                _, token, sp, *rest = job
-                scale = rest[0] if rest else 1.0
-                # 合并积压请求：只渲染最新的那一份
-                while True:
-                    try:
-                        nx = self.jobs.get_nowait()
-                    except queue.Empty:
-                        break
-                    if nx is None:
-                        return
-                    if nx[0] == "render":
-                        token, sp = nx[1], nx[2]
-                        scale = nx[3] if len(nx) > 3 else 1.0
-                    else:
-                        self.jobs.put(nx)
-                        break
-                s = self.session
-                if s is None:
-                    continue
+                continue
+
+            # kind == "render"
+            _, token, job, scale, level = msg
+            # 合并积压请求：参数取最新的那一份，重算级别取最高的那一个
+            # （否则拖动打印滑块后紧接着拖动扫描滑块，会把「重跑打印」这一步丢掉）
+            while True:
                 try:
-                    t0 = time.perf_counter()
-                    img = s.rescan(sp, scale=scale)
-                    cost = time.perf_counter() - t0
-                    self.results.put(("render", token, (img, cost, scale), None))
-                except Exception as e:
-                    log.exception("预览渲染失败")
-                    self.results.put(("render", token, None, e))
+                    nx = self.jobs.get_nowait()
+                except queue.Empty:
+                    break
+                if nx is None:
+                    return
+                if nx[0] == "render":
+                    _, token, job, scale, level = nx
+                else:
+                    self.jobs.put(nx)
+                    break
+
+            try:
+                s = self.session
+                if s is None or level == "rebuild":
+                    s = engine.PreviewSession(self.src, job,
+                                              page_index=self.page_index,
+                                              max_side=1100)
+                    self.session = s
+                    self.results.put(("session", token, s, None))
+                elif level == "print":
+                    s.reprint(job.print_params)
+
+                t0 = time.perf_counter()
+                img = s.rescan(job.scan_params, scale=scale)
+                cost = time.perf_counter() - t0
+                self.results.put(("render", token, (img, cost, scale), None))
+            except Exception as e:
+                log.exception("预览渲染失败")
+                self.results.put(("render", token, None, e))
 
     # --------------------------------------------------------------- 轮询
     def _poll(self):
@@ -1755,23 +2175,20 @@ class PreviewWindow(tk.Toplevel):
                     kind, token, payload, err = self.results.get_nowait()
                 except queue.Empty:
                     break
-                if kind == "init":
+
+                if kind in ("init", "session"):
                     if err is not None:
                         self._status(f"预览准备失败：{err}")
                         messagebox.showerror("预览失败", f"{type(err).__name__}: {err}",
                                              parent=self)
                         continue
                     self.session = payload
-                    info = payload.info
-                    self.job_page_count = info["page_count"]
-                    self.lbl_info.configure(text=(
-                        f"打印引擎：{PRINT_MODES.get(self.job.print_params.mode, '')}\n"
-                        f"纸张：{info['sheet_mm'][0]:.0f} × {info['sheet_mm'][1]:.0f} mm\n"
-                        f"预览 {info['preview_dpi']:.0f} DPI  ·  正式输出 {info['render_dpi']} DPI\n"
-                        f"输出：{self.job.output_params.out_dpi} DPI / "
-                        f"{ {'gray': '灰度', 'binary': '黑白二值', 'color': '彩色'}.get(self.job.scan_params.out_mode, self.job.scan_params.out_mode) }"))
+                    self._ready = True
+                    self._update_info()
                     self._update_page_label()
-                    self._request_render(quick=False)
+                    if kind == "init":
+                        self._pending_level = "scan"
+                        self._request_render(quick=False)
                 else:
                     if err is not None:
                         self._status(f"渲染失败：{err}")
@@ -1790,6 +2207,21 @@ class PreviewWindow(tk.Toplevel):
         except Exception:
             log.exception("预览轮询异常")
         self.after(40, self._poll)
+
+    def _update_info(self):
+        info = getattr(self.session, "info", None)
+        if not info:
+            return
+        self.job_page_count = info["page_count"]
+        mode_label = {"gray": "灰度", "binary": "黑白二值",
+                      "color": "彩色"}.get(self.sp.out_mode, self.sp.out_mode)
+        self.lbl_info.configure(text=(
+            f"打印：{PRINT_MODES.get(self.pp.mode, '')} · {self.pp.paper_label}\n"
+            f"纸张：{info['sheet_mm'][0]:.0f} × {info['sheet_mm'][1]:.0f} mm"
+            f"（原页 {info['src_mm'][0]:.0f} × {info['src_mm'][1]:.0f}）\n"
+            f"预览 {info['preview_dpi']:.0f} DPI  ·  正式输出 {info['render_dpi']} DPI\n"
+            f"输出：{self.op.out_dpi} DPI / {mode_label}\n"
+            f"页面间：{self.sp.variation_label}"))
 
     @staticmethod
     def _to_pil(arr: np.ndarray) -> Image.Image:
@@ -1836,7 +2268,7 @@ class PreviewWindow(tk.Toplevel):
         self.page_index = page_index
         self.session = None
         self._status(f"正在加载第 {page_index + 1} 页…")
-        self.jobs.put(("init", page_index, 0))
+        self.jobs.put(("init", page_index, 0, self._make_job()))
         self._update_page_label()
 
     def _update_page_label(self):
@@ -1844,10 +2276,10 @@ class PreviewWindow(tk.Toplevel):
         self.lbl_page.configure(text=f"第 {self.page_index + 1} / {total} 页")
 
     def _show_summary(self):
-        s = self.sp
+        p, s = self.pp, self.sp
         ang = "随机" if self.skew_random.get() else f"{s.skew_deg:+.2f}°"
-        self._status(f"模糊度 {s.blur:.2f}   ·   噪点 {s.noise:.2f}   ·   倾斜 {ang}   "
-                     f"·   纸底 {s.paper_base:.0f}")
+        self._status(f"浓度 {p.density:.2f}  ·  扩散 {p.spread:.2f}  ·  颗粒 {p.grain:.2f}"
+                     f"  ·  模糊 {s.blur:.2f}  ·  噪点 {s.noise:.2f}  ·  倾斜 {ang}")
 
     def _status(self, text: str):
         # 构建期间（右侧还没建好）可能被提前调用，这里做保护
@@ -1856,61 +2288,119 @@ class PreviewWindow(tk.Toplevel):
             lbl.configure(text=text)
 
     def _apply_to_main(self):
-        """把预览里调好的参数写回主界面，直接用于正式处理"""
-        self._read_sliders()
-        ang = "随机（每页不同）" if self.skew_random.get() else f"{self.sp.skew_deg:+.2f}°"
+        """把预览里调好的三页参数写回主界面，直接用于正式处理"""
+        job = self._make_job()
+        pp, sp, lp = job.print_params, job.scan_params, job.layout_params
         a = self.app
-        a.v_blur.set(self.sp.blur)
-        a.v_noise.set(self.sp.noise)
-        a.v_paperbase.set(self.sp.paper_base)
-        a.v_cloud.set(self.sp.paper_cloud)
-        a.v_scontrast.set(self.sp.contrast)
-        a.v_bright.set(self.sp.brightness)
-        a.v_vignette.set(self.sp.vignette)
-        a.v_jpegq.set(self.sp.jpeg_quality)
-        a.v_threshold.set(self.sp.binary_threshold)
-        a.v_scanmode.set(self.sp.out_mode)
-        a.v_warmth.set(self.sp.paper_warmth)
-        a.v_cast.set(self.sp.color_cast)
-        a.v_sat.set(self.sp.sat_boost)
-        a._on_scanmode_change()
 
-        if self.skew_random.get():
+        # ---- 打印 ----
+        a.v_mode.set(pp.mode)
+        a.v_papertype.set(PRINT_PAPER_TYPES.get(pp.paper_type,
+                                               PRINT_PAPER_TYPES["plain"]))
+        a.v_density.set(pp.density)
+        a.v_pcontrast.set(pp.contrast)
+        a.v_spread.set(pp.spread)
+        a.v_grain.set(pp.grain)
+        a.v_fog.set(pp.fog)
+        a.v_halftone.set(pp.halftone)
+        a.v_misreg.set(pp.misregister)
+        a.v_tac.set(pp.tac_limit)
+
+        # ---- 扫描 ----
+        a.v_pvary.set(PAGE_VARIATIONS.get(sp.page_variation,
+                                          PAGE_VARIATIONS["uniform"]))
+        a.v_paperbase.set(sp.paper_base)
+        a.v_cloud.set(sp.paper_cloud)
+        a.v_noise.set(sp.noise)
+        a.v_dust.set(sp.dust)
+        a.v_streak.set(sp.streak)
+        a.v_blur.set(sp.blur)
+        a.v_scontrast.set(sp.contrast)
+        a.v_bright.set(sp.brightness)
+        a.v_vignette.set(sp.vignette)
+        a.v_jpegq.set(sp.jpeg_quality)
+        a.v_threshold.set(sp.binary_threshold)
+        a.v_scanmode.set(sp.out_mode)
+        a.v_warmth.set(sp.paper_warmth)
+        a.v_cast.set(sp.color_cast)
+        a.v_sat.set(sp.sat_boost)
+        if sp.skew_deg is None:
             a.v_skew_random.set(True)
+            a.v_skew_amt.set(sp.skew_random)
         else:
             a.v_skew_random.set(False)
-            a.v_skew.set(self.sp.skew_deg or 0.0)
-        a._on_skew_toggle()
+            a.v_skew.set(sp.skew_deg)
+            a.v_skew_amt.set(sp.skew_random)
+
+        # ---- 版式 ----
+        a.v_paper.set(paper.PAPER_LABELS.get(lp.paper, lp.paper))
+        a.v_cw.set(f"{lp.custom_w_mm:g}")
+        a.v_ch.set(f"{lp.custom_h_mm:g}")
+        a.v_orient.set(lp.orientation)
+        a.v_margin.set(lp.margin_mm)
+        a.v_scale.set(SCALE_MODES.get(lp.scale_mode, SCALE_MODES["fit"]))
 
         for s in a._sliders:
             s.refresh()
+        a._on_scanmode_change()
+        a._on_skew_toggle()
+        a._on_mode_change()
+        a._on_paper_change()
+        a._sync_format()
+
         a.v_status.set("已把预览参数应用到主界面")
-        log.info("预览参数已回填主界面: 模糊=%.2f 噪点=%.2f 倾斜=%s 纸底=%.0f",
-                 self.sp.blur, self.sp.noise,
-                 "随机" if self.skew_random.get() else f"{self.sp.skew_deg:+.2f}",
-                 self.sp.paper_base)
+        log.info("预览参数已回填主界面: 打印=%s/%s 浓度=%.2f 模糊=%.2f 噪点=%.2f "
+                 "页面间=%s 纸张=%s",
+                 pp.mode, pp.paper_type, pp.density, sp.blur, sp.noise,
+                 sp.page_variation, lp.paper)
         messagebox.showinfo(
             "已应用",
             "已将预览中调整的参数写回主界面：\n\n"
-            f"· 模糊度：{self.sp.blur:.2f}\n"
-            f"· 噪点：{self.sp.noise:.2f}\n"
-            f"· 倾斜度：{ang}\n"
-            f"· 纸底灰度：{self.sp.paper_base:.0f}   纸底不均匀：{self.sp.paper_cloud:.2f}\n"
-            f"· 扫描对比度：{self.sp.contrast:.2f}   亮度：{self.sp.brightness:.2f}\n"
-            f"· 边缘暗角：{self.sp.vignette:.2f}   JPEG 质量：{self.sp.jpeg_quality:.0f}",
+            f"· 打印：{PRINT_MODES.get(pp.mode, '')} / {pp.paper_label}\n"
+            f"· 浓度 {pp.density:.2f}   扩散 {pp.spread:.2f}   颗粒 {pp.grain:.2f}   "
+            f"底灰 {pp.fog:.2f}\n"
+            f"· 纸底 {sp.paper_base:.0f}   云斑 {sp.paper_cloud:.2f}   "
+            f"噪点 {sp.noise:.2f}   灰尘 {sp.dust:.2f}   条纹 {sp.streak:.2f}\n"
+            f"· 模糊 {sp.blur:.2f}   倾斜 "
+            f"{'随机 ±' + format(sp.skew_random, '.2f') + '°' if sp.skew_deg is None else format(sp.skew_deg, '+.2f') + '°'}\n"
+            f"· 页面间：{sp.variation_label}\n"
+            f"· 纸张 {paper.PAPER_LABELS.get(lp.paper, lp.paper)}   "
+            f"边距 {lp.margin_mm:.1f} mm   缩放 {SCALE_MODES.get(lp.scale_mode, '')}",
             parent=self)
 
     def _reset(self):
+        self.pp = PrintParams(**vars(self.job.print_params))
         self.sp = ScanParams(**vars(self.job.scan_params))
+        self.lp = LayoutParams(**vars(self.job.layout_params))
+        self.op = OutputParams(**vars(self.job.output_params))
         self.skew_random.set(self.sp.skew_deg is None)
         if self.sp.skew_deg is None:
             self.sp.skew_deg = 0.0
-        for name, s in self._p_sliders.items():
-            s.var.set(getattr(self.sp, name))
-            s.refresh()
+
+        self.pmode.set(self.pp.mode)
+        self.papertype.set(PRINT_PAPER_TYPES.get(self.pp.paper_type,
+                                                PRINT_PAPER_TYPES["plain"]))
         self.scanmode.set(self.sp.out_mode)
-        self._on_skew_toggle()
+        self.pvary.set(PAGE_VARIATIONS.get(self.sp.page_variation,
+                                           PAGE_VARIATIONS["uniform"]))
+        self.papervar.set(paper.PAPER_LABELS.get(self.lp.paper, self.lp.paper))
+        self.orientvar.set(self.lp.orientation)
+        self.scalevar.set(SCALE_MODES.get(self.lp.scale_mode, SCALE_MODES["fit"]))
+        self.rendervar.set(str(self.op.render_dpi))
+        self.cwvar.set(f"{self.lp.custom_w_mm:g}")
+        self.chvar.set(f"{self.lp.custom_h_mm:g}")
+        self.sl_margin.var.set(self.lp.margin_mm)
+
+        for group, field, s in self._p_sliders:
+            target = self.pp if group == "print" else self.sp
+            s.var.set(getattr(target, field))
+            s.refresh()
+        self.sl_margin.refresh()
+
+        self._on_pmode()
         self._on_scanmode()
+        self._on_skew_toggle()
+        self._on_paper_change()
         self._status("已恢复为打开预览时的参数")
 
     def _save(self):
@@ -1925,7 +2415,8 @@ class PreviewWindow(tk.Toplevel):
             return
         try:
             Image.fromarray(self.last_image,
-                            mode="RGB" if getattr(self.last_image, "ndim", 2) == 3 else "L").save(p)
+                            mode="RGB" if getattr(self.last_image, "ndim", 2) == 3
+                            else "L").save(p)
             self._status(f"已保存：{p}")
             log.info("预览图已保存: %s", p)
         except Exception as e:
@@ -1942,6 +2433,7 @@ class PreviewWindow(tk.Toplevel):
             self.destroy()
         except Exception:
             pass
+
 
 
 def main():

@@ -58,26 +58,30 @@ for f in sorted((ROOT / "test").glob("*.pdf")):
     app.files.append(f)
     app.page_counts[str(f)] = n
 app._refresh_count()
+# 截图会进 docs 并公开在仓库里，输出目录必须换成中性占位路径，
+# 不能把本机的真实目录结构截进去，否则等于公开自己的磁盘布局。
+app.v_outdir.set(r"D:\扫描输出")
+app.v_seed.set("20261109")
 pump(app, 0.4)
 
 for i, name in enumerate(["ui_tab1_print.png", "ui_tab2_scan.png", "ui_tab3_layout.png"]):
     app.nb.select(i)
     grab(app, name)
 
-# 预览窗口
+# 预览窗口：三个参数页各截一张（v1.0.5 起预览可调打印/扫描/版式）
 job = RenderJob(print_params=PrintParams(mode="mono_laser"),
                 scan_params=ScanParams(),
                 layout_params=LayoutParams(paper="A4"),
                 output_params=OutputParams(render_dpi=200, out_dpi=200))
 win = PreviewWindow(app, sorted((ROOT / "test").glob("*.pdf"))[0], job, 0)
-win.geometry("1320x820+60+30")
+win.geometry("1330x930+60+30")
 pump(app, 2.5)
-grab(win, "ui_preview.png")
 
-# 把左栏滚到底，确认按钮可达
-win.scroll.canvas.yview_moveto(1.0)
-pump(app, 0.4)
-grab(win, "ui_preview_bottom.png")
+for i, name in enumerate(["ui_preview_print.png", "ui_preview_scan.png",
+                          "ui_preview_layout.png"]):
+    win.nb.select(i)
+    pump(app, 0.5)
+    grab(win, name)
 
 win._on_close()
 app.destroy()

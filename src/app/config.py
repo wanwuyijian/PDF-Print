@@ -16,6 +16,22 @@ PRINT_MODES = {
     "color_inkjet": "彩色喷墨打印机（染料墨水）",
 }
 
+# 纸张类型：同一种墨，印在不同纸上洇墨程度差很多。
+# 涂布纸表面光滑，墨点被「封」在表面 → 扩散小、颗粒细、字口实；
+# 再生纸/草纸纤维粗长 → 毛细渗透严重、掉粉多、边缘发毛。
+PRINT_PAPER_TYPES = {
+    "plain":    "普通复印纸（70~80g 无涂布）",
+    "coated":   "铜版 / 涂布纸（表面光滑）",
+    "recycled": "再生纸 / 草纸（纤维粗）",
+}
+
+PAPER_TYPE_TRAITS = {
+    #            扩散系数  颗粒系数
+    "plain":    (1.00, 1.00),
+    "coated":   (0.55, 0.70),
+    "recycled": (1.50, 1.55),
+}
+
 # 各打印引擎的物理特征默认值：反射率下限 / 墨点扩散 / 色彩串扰
 ENGINE_TRAITS = {
     #            暗部反射率下限  墨扩散sigma  串扰px  彩度增益  黑偏色(RGB偏移)
@@ -29,6 +45,7 @@ ENGINE_TRAITS = {
 class PrintParams:
     """打印效果参数"""
     mode: str = "mono_laser"        # PRINT_MODES 的键
+    paper_type: str = "plain"       # PRINT_PAPER_TYPES 的键
 
     # 浓度：1.0 为标准。>1 表示碳粉/墨量更足（印得更黑更实），<1 表示淡印
     density: float = 1.00
@@ -38,6 +55,8 @@ class PrintParams:
     spread: float = 0.35
     # 颗粒感 0~1（碳粉颗粒 / 墨滴不均）
     grain: float = 0.30
+    # 底灰 0~1（定影不净时白底浮一层极淡的墨雾，彩色机四色版都会留底）
+    fog: float = 0.10
     # 半色调网点强度 0~1（打印机用网点表现灰阶）
     halftone: float = 0.25
     # 色彩串扰 0~1（四色套印不准导致的彩边，仅彩色模式有效）
@@ -48,6 +67,10 @@ class PrintParams:
     def trait(self) -> tuple:
         return ENGINE_TRAITS.get(self.mode, ENGINE_TRAITS["mono_laser"])
 
+    def paper_traits(self) -> tuple[float, float]:
+        """(扩散系数, 颗粒系数)"""
+        return PAPER_TYPE_TRAITS.get(self.paper_type, PAPER_TYPE_TRAITS["plain"])
+
     @property
     def is_mono(self) -> bool:
         return self.mode == "mono_laser"
@@ -56,19 +79,42 @@ class PrintParams:
     def mode_label(self) -> str:
         return PRINT_MODES.get(self.mode, self.mode)
 
+    @property
+    def paper_label(self) -> str:
+        return PRINT_PAPER_TYPES.get(self.paper_type, self.paper_type)
+
 
 # =========================================================================== #
 # 扫描效果参数
 # =========================================================================== #
+# 页面间效果一致性。
+# 这是「输出文件好不好看」的第一决定项：真实的一叠纸是同一批纸、同一次过机，
+# 纸底、噪点纹理、偏色几乎完全一致，只有进纸歪斜会有几十分之一度的差别。
+# 旧版每页都重新抽随机数，结果同一份 PDF 里歪斜方向、脏点位置、整体偏色逐页乱跳，
+# 翻页时像在看十几份不同的扫描件 —— 这正是「输出太难看了」的根源。
+PAGE_VARIATIONS = {
+    "uniform": "整份统一（推荐）",
+    "jitter":  "仅倾斜微抖",
+    "random":  "逐页随机（杂乱）",
+}
+
+
 @dataclass
 class ScanParams:
-    """扫描效果参数（最终产出为黑白/灰度扫描件）"""
+    """扫描效果参数（最终产出为黑白/灰度/彩色扫描件）"""
+    # 页面间效果一致性：uniform / jitter / random，见 PAGE_VARIATIONS
+    page_variation: str = "uniform"
+
     # 纸张底色灰度（255=纯白。真实纸基通常 238~251）
     paper_base: float = 246.0
     # 纸张底色不均匀（云斑/纤维纹理）0~1
     paper_cloud: float = 0.35
-    # 传感器噪点 0~1
+    # 传感器噪点 0~1（高斯噪声，暗部更明显）
     noise: float = 0.30
+    # 灰尘 / 污渍点 0~1（传感器坏点、纸面粉尘、复印机鼓面污迹）
+    dust: float = 0.20
+    # 纵向条纹 0~1（CIS 标定不均、走纸划痕 —— 老式扫描仪最典型的毛病）
+    streak: float = 0.0
     # 扫描光学模糊 sigma（px）0~2
     blur: float = 0.45
     # 对比度 / 亮度（模拟扫描仪自动曝光）
@@ -109,6 +155,10 @@ class ScanParams:
     @property
     def is_color(self) -> bool:
         return self.out_mode == "color"
+
+    @property
+    def variation_label(self) -> str:
+        return PAGE_VARIATIONS.get(self.page_variation, self.page_variation)
 
 
 # =========================================================================== #
@@ -161,7 +211,7 @@ class OutputParams:
     name_suffix: str = "_scan"       # 输出文件名后缀
     jpeg_in_pdf: bool = True         # PDF 内嵌图像使用 JPEG（体积小）
     open_folder_after: bool = False  # 完成后打开输出目录
-    # 随机种子：0 = 每次运行都不同（推荐，避免所有页面纹理雷同）；
+    # 随机种子：0 = 每次运行都不同（推荐，避免所有任务纹理雷同）；
     # 设为非 0 的固定值可使「噪点/云斑/倾斜」完全可复现，便于对比参数或复现 bug
     seed: int = 0
 
@@ -199,9 +249,11 @@ class RenderJob:
         """单行摘要，写进日志便于复现问题"""
         p, s, l, o = self.print_params, self.scan_params, self.layout_params, self.output_params
         return (
-            f"模式={p.mode_label} 浓度={p.density:.2f} 扩散={p.spread:.2f} 颗粒={p.grain:.2f} "
-            f"网点={p.halftone:.2f} | 扫描: 纸底={s.paper_base:.0f} 云斑={s.paper_cloud:.2f} "
-            f"噪点={s.noise:.2f} 模糊={s.blur:.2f} 对比={s.contrast:.2f} 倾斜={s.skew_deg}±{s.skew_random:.2f} "
+            f"模式={p.mode_label} 纸={p.paper_label} 浓度={p.density:.2f} 扩散={p.spread:.2f} "
+            f"颗粒={p.grain:.2f} 网点={p.halftone:.2f} | "
+            f"扫描: 一致性={s.page_variation} 纸底={s.paper_base:.0f} 云斑={s.paper_cloud:.2f} "
+            f"噪点={s.noise:.2f} 灰尘={s.dust:.2f} 条纹={s.streak:.2f} 模糊={s.blur:.2f} "
+            f"对比={s.contrast:.2f} 倾斜={s.skew_deg}±{s.skew_random:.2f} "
             f"暗角={s.vignette:.2f} JPG={s.jpeg_quality} 输出={s.out_mode} | "
             f"纸张={l.paper} {l.orientation} 边距={l.margin_mm}mm 缩放={l.scale_mode} | "
             f"打印DPI={o.render_dpi} 扫描DPI={o.out_dpi} 格式={o.out_format} 页={self.pages}"
@@ -217,84 +269,103 @@ def _mk_print(**kw) -> dict:
 
 BUILTIN_PRESETS: dict[str, dict] = {
     "标准文档（推荐）": dict(
-        print_params=_mk_print(mode="mono_laser", density=1.00, contrast=1.00,
-                               spread=0.35, grain=0.30, halftone=0.25),
-        scan_params=dict(paper_base=246, paper_cloud=0.35, noise=0.30, blur=0.45,
+        print_params=_mk_print(mode="mono_laser", paper_type="plain", density=1.00,
+                               contrast=1.00, spread=0.35, grain=0.30, halftone=0.25),
+        scan_params=dict(page_variation="uniform", paper_base=246, paper_cloud=0.35,
+                         noise=0.30, dust=0.18, streak=0.0, blur=0.45,
                          contrast=1.07, brightness=1.00, vignette=0.25,
                          jpeg_quality=78, out_mode="gray"),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
     ),
     "轻印淡扫（干净）": dict(
-        print_params=_mk_print(mode="mono_laser", density=0.86, contrast=0.95,
-                               spread=0.22, grain=0.16, halftone=0.14),
-        scan_params=dict(paper_base=251, paper_cloud=0.18, noise=0.15, blur=0.30,
+        print_params=_mk_print(mode="mono_laser", paper_type="plain", density=0.86,
+                               contrast=0.95, spread=0.22, grain=0.16, halftone=0.14),
+        scan_params=dict(page_variation="uniform", paper_base=251, paper_cloud=0.18,
+                         noise=0.15, dust=0.08, streak=0.0, blur=0.30,
                          contrast=1.03, brightness=1.02, vignette=0.10,
                          jpeg_quality=90, out_mode="gray"),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=6.0, scale_mode="fit"),
     ),
     "重印浓扫（复印机味）": dict(
-        print_params=_mk_print(mode="mono_laser", density=1.18, contrast=1.16,
-                               spread=0.70, grain=0.55, halftone=0.42),
-        scan_params=dict(paper_base=239, paper_cloud=0.60, noise=0.50, blur=0.85,
+        print_params=_mk_print(mode="mono_laser", paper_type="recycled", density=1.18,
+                               contrast=1.16, spread=0.70, grain=0.55, halftone=0.42),
+        scan_params=dict(page_variation="uniform", paper_base=239, paper_cloud=0.60,
+                         noise=0.50, dust=0.40, streak=0.22, blur=0.85,
                          contrast=1.18, brightness=0.97, vignette=0.42,
                          jpeg_quality=62, out_mode="gray"),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=10.0, scale_mode="fit"),
     ),
     "老旧复印机（脏底）": dict(
-        print_params=_mk_print(mode="mono_laser", density=1.10, contrast=1.10,
-                               spread=0.85, grain=0.70, halftone=0.50),
-        scan_params=dict(paper_base=229, paper_cloud=0.85, noise=0.62, blur=1.05,
+        print_params=_mk_print(mode="mono_laser", paper_type="recycled", density=1.10,
+                               contrast=1.10, spread=0.85, grain=0.70, halftone=0.50),
+        scan_params=dict(page_variation="jitter", paper_base=229, paper_cloud=0.85,
+                         noise=0.62, dust=0.55, streak=0.38, blur=1.05,
                          contrast=1.22, brightness=0.95, vignette=0.55,
                          jpeg_quality=52, out_mode="gray"),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=12.0, scale_mode="fit"),
     ),
     "黑白二值扫描（硬字口）": dict(
-        print_params=_mk_print(mode="mono_laser", density=1.05, contrast=1.05,
-                               spread=0.30, grain=0.25, halftone=0.20),
-        scan_params=dict(paper_base=250, paper_cloud=0.25, noise=0.28, blur=0.50,
+        print_params=_mk_print(mode="mono_laser", paper_type="plain", density=1.05,
+                               contrast=1.05, spread=0.30, grain=0.25, halftone=0.20),
+        scan_params=dict(page_variation="uniform", paper_base=250, paper_cloud=0.25,
+                         noise=0.28, dust=0.12, streak=0.0, blur=0.50,
                          contrast=1.10, brightness=1.00, vignette=0.20,
                          jpeg_quality=80, out_mode="binary", binary_threshold=158),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
     ),
     "彩色打印→黑白扫描": dict(
-        print_params=_mk_print(mode="color_laser", density=1.00, contrast=1.02,
-                               spread=0.55, grain=0.30, halftone=0.20,
+        print_params=_mk_print(mode="color_laser", paper_type="plain", density=1.00,
+                               contrast=1.02, spread=0.55, grain=0.30, halftone=0.20,
                                misregister=0.55, tac_limit=280),
-        scan_params=dict(paper_base=245, paper_cloud=0.40, noise=0.34, blur=0.55,
+        scan_params=dict(page_variation="uniform", paper_base=245, paper_cloud=0.40,
+                         noise=0.34, dust=0.20, streak=0.0, blur=0.55,
                          contrast=1.06, brightness=1.00, vignette=0.28,
                          jpeg_quality=76, out_mode="gray"),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
     ),
     # ---- 彩色扫描（v1.0.4）----
     "彩色打印→彩色扫描（推荐）": dict(
-        print_params=_mk_print(mode="color_laser", density=1.00, contrast=1.02,
-                               spread=0.55, grain=0.30, halftone=0.20,
+        print_params=_mk_print(mode="color_laser", paper_type="coated", density=1.00,
+                               contrast=1.02, spread=0.55, grain=0.30, halftone=0.20,
                                misregister=0.55, tac_limit=280),
-        scan_params=dict(paper_base=245, paper_cloud=0.40, noise=0.34, blur=0.55,
+        scan_params=dict(page_variation="uniform", paper_base=245, paper_cloud=0.40,
+                         noise=0.34, dust=0.16, streak=0.0, blur=0.55,
                          contrast=1.06, brightness=1.00, vignette=0.28,
                          jpeg_quality=82, out_mode="color",
                          paper_warmth=0.30, color_cast=0.18, sat_boost=1.05),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
     ),
     "彩色喷墨→彩色扫描（鲜艳）": dict(
-        print_params=_mk_print(mode="color_inkjet", density=1.05, contrast=1.00,
-                               spread=0.62, grain=0.24, halftone=0.14,
+        print_params=_mk_print(mode="color_inkjet", paper_type="coated", density=1.05,
+                               contrast=1.00, spread=0.62, grain=0.24, halftone=0.14,
                                misregister=0.35, tac_limit=270),
-        scan_params=dict(paper_base=246, paper_cloud=0.35, noise=0.28, blur=0.48,
+        scan_params=dict(page_variation="uniform", paper_base=246, paper_cloud=0.35,
+                         noise=0.28, dust=0.12, streak=0.0, blur=0.48,
                          contrast=1.04, brightness=1.00, vignette=0.22,
                          jpeg_quality=86, out_mode="color",
                          paper_warmth=0.24, color_cast=0.12, sat_boost=1.14),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
     ),
     "彩色扫描·老旧褪色": dict(
-        print_params=_mk_print(mode="color_laser", density=0.94, contrast=1.00,
-                               spread=0.72, grain=0.38, halftone=0.24,
+        print_params=_mk_print(mode="color_laser", paper_type="recycled", density=0.94,
+                               contrast=1.00, spread=0.72, grain=0.38, halftone=0.24,
                                misregister=0.70, tac_limit=290),
-        scan_params=dict(paper_base=237, paper_cloud=0.68, noise=0.48, blur=0.78,
+        scan_params=dict(page_variation="jitter", paper_base=237, paper_cloud=0.68,
+                         noise=0.48, dust=0.45, streak=0.30, blur=0.78,
                          contrast=1.12, brightness=0.96, vignette=0.46,
                          jpeg_quality=64, out_mode="color",
                          paper_warmth=0.62, color_cast=0.34, sat_boost=0.88),
         layout_params=dict(paper="A4", orientation="auto", margin_mm=10.0, scale_mode="fit"),
+    ),
+    # 需求1 的反向档：确实需要「每页都不一样」时用它
+    "叠扫杂乱（逐页随机）": dict(
+        print_params=_mk_print(mode="mono_laser", paper_type="plain", density=1.02,
+                               contrast=1.02, spread=0.45, grain=0.36, halftone=0.28),
+        scan_params=dict(page_variation="random", paper_base=243, paper_cloud=0.55,
+                         noise=0.40, dust=0.30, streak=0.12, blur=0.60,
+                         contrast=1.10, brightness=0.99, vignette=0.35,
+                         jpeg_quality=70, out_mode="gray"),
+        layout_params=dict(paper="A4", orientation="auto", margin_mm=8.0, scale_mode="fit"),
     ),
 }
 

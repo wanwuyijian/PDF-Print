@@ -423,7 +423,128 @@ def run_selftest() -> tuple[bool, str]:
         assert chroma < 25, f"黑白打印机的彩色扫描彩度过高({chroma})，说明灰墨约束失效"
         c.detail = f"彩度 {chroma}（应 <25，仅来自纸张暖调与白平衡）"
 
-    # ================= 7. 崩溃日志链路 =================
+    # ================= 7. 页面间效果一致性（v1.0.5 新增）=================
+    # 这是 v1.0.5 的核心修复：以前一个 rng 贯穿所有页，每页的噪点场、
+    # 云斑、倾斜、白平衡方向全都不一样，同一份 PDF 翻页像十几份不同扫描件。
+    # 注意：上面的彩色检查把 `out` 这个名字占用成了 ndarray，
+    # 这里另起 `outdir`，别再碰 `out`。
+    outdir = tmp / "out"
+
+    def _paper_patch(path: Path) -> np.ndarray:
+        """取页边空白纸面（内容是逐页不同的，纹理才是我们关心的）"""
+        from PIL import Image as _Image
+        a = np.asarray(_Image.open(path).convert("L"), dtype=np.float32)
+        return a[8:48, 8:48]
+
+    with _check("页面间效果：整份统一时各页纹理完全一致") as c:
+        job = RenderJob(PrintParams(mode="mono_laser"), ScanParams(),
+                        LayoutParams(paper="A4", margin_mm=8),
+                        OutputParams(render_dpi=150, out_dpi=150, out_format="png",
+                                     out_dir=str(outdir), name_suffix="_uni", seed=777))
+        engine.process_pdf(src, job, out_dir=outdir)
+
+        p1, p2 = outdir / "selftest_uni_p001.png", outdir / "selftest_uni_p002.png"
+        assert p1.exists() and p2.exists(), "缺少产物"
+        a1, a2 = _paper_patch(p1), _paper_patch(p2)
+        d = float(np.abs(a1 - a2).max())
+        assert d == 0.0, f"两页纸面纹理存在差异（最大差 {d:.2f}），整份统一未生效"
+        c.detail = f"两页纸面 patch 完全一致（{a1.mean():.2f} 灰度）"
+
+    with _check("页面间效果：逐页随机时各页纹理确实不同") as c:
+        job = RenderJob(PrintParams(mode="mono_laser"),
+                        ScanParams(page_variation="random", noise=0.6, dust=0.5),
+                        LayoutParams(paper="A4", margin_mm=8),
+                        OutputParams(render_dpi=150, out_dpi=150, out_format="png",
+                                     out_dir=str(outdir), name_suffix="_rnd", seed=777))
+        engine.process_pdf(src, job, out_dir=outdir)
+
+        a1 = _paper_patch(outdir / "selftest_rnd_p001.png")
+        a2 = _paper_patch(outdir / "selftest_rnd_p002.png")
+        d = float(np.abs(a1 - a2).mean())
+        assert d > 0.5, f"逐页随机模式下两页纸面几乎相同（平均差 {d:.3f}），开关失效"
+        c.detail = f"两页纸面 patch 平均差 {d:.2f}（>0.5 视为确实不同）"
+
+    with _check("页面间效果：仅倾斜微抖时纹理一致、角度不同") as c:
+        sp = ScanParams(page_variation="jitter", skew_random=1.5)
+        skews = [effects.resolve_skew(sp, 999, i) for i in range(4)]
+        assert len(set(round(s, 6) for s in skews)) > 1, f"逐页角度居然相同: {skews}"
+        uni = ScanParams(page_variation="uniform", skew_random=1.5)
+        same = {round(effects.resolve_skew(uni, 999, i), 9) for i in range(4)}
+        assert len(same) == 1, f"整份统一模式下角度却不同: {same}"
+        assert effects.page_seed(888, 0, "jitter") == effects.page_seed(888, 3, "jitter"), \
+            "jitter 模式下纹理种子不应随页号变化"
+        assert effects.page_seed(888, 0, "random") != effects.page_seed(888, 3, "random"), \
+            "random 模式下纹理种子必须随页号变化"
+        c.detail = f"jitter 角度 {['%+.2f' % s for s in skews]}；uniform 恒定 {same.pop():+.2f}°"
+
+    # ================= 8. 纸张类型 / 底灰 / 灰尘 / 条纹（v1.0.5 新增）=================
+    def _flat_sheet(v=1.0):
+        """纯白纸面（不含内容），用于隔离观察扫描侧效果"""
+        return np.full((160, 160, 3), v, np.float32)
+
+    with _check("纸张类型：铜版纸比再生纸更平滑") as c:
+        stats = {}
+        for pt in ("coated", "plain", "recycled"):
+            sp = ScanParams(skew_deg=0.0, noise=0.0, dust=0.0, vignette=0.0,
+                            paper_cloud=1.0, out_mode="gray")
+            o = effects.simulate(_flat_sheet(), PrintParams(paper_type=pt), sp,
+                                 np.random.default_rng(4))
+            stats[pt] = float(np.asarray(o, dtype=np.float32).std())
+        assert stats["coated"] < stats["plain"] < stats["recycled"], \
+            f"颗粒感排序不符合纸张特性: {stats}"
+        c.detail = (f"铜版 {stats['coated']:.2f} ＜ 普通 {stats['plain']:.2f} "
+                    f"＜ 再生 {stats['recycled']:.2f}（标准差）")
+
+    with _check("底灰：白纸整页变灰且幅度受控") as c:
+        means = {}
+        for fog in (0.0, 0.5, 1.0):
+            sp = ScanParams(skew_deg=0.0, noise=0.0, dust=0.0, vignette=0.0,
+                            paper_cloud=0.0, out_mode="gray")
+            o = effects.simulate(_flat_sheet(), PrintParams(fog=fog), sp,
+                                 np.random.default_rng(6))
+            means[fog] = float(np.asarray(o, dtype=np.float32).mean())
+        assert means[0.0] > means[0.5] > means[1.0], f"底灰方向反了: {means}"
+        drop = means[0.0] - means[1.0]
+        assert 1.0 < drop < 14.0, f"底灰幅度 {drop:.1f} 灰阶不合理（应 1~14）"
+        c.detail = (f"fog=0 → {means[0.0]:.1f}，fog=1 → {means[1.0]:.1f}，"
+                    f"压暗 {drop:.1f} 灰阶")
+
+    with _check("灰尘：参数为 0 时纸面干净，调高后出现成块斑点") as c:
+        def dust_stats(v):
+            sp = ScanParams(skew_deg=0.0, noise=0.0, vignette=0.0, paper_cloud=0.0,
+                            dust=v, out_mode="gray")
+            # 用接近 A4 的尺寸：斑点数按物理面积算，160px 的小图上
+            # dust=0.5 只有几个点，统计不出东西。
+            sheet = np.full((800, 600, 3), 1.0, np.float32)
+            o = np.asarray(effects.simulate(sheet, PrintParams(), sp,
+                                            np.random.default_rng(9)), dtype=np.float32)
+            # 「墨点」= 明显比纸面暗的像素。纸底纤维纹理只有 ±3 灰阶，
+            # 真正的污点会压暗 40 以上，两者能量差着数量级。
+            ink = float((o < o.mean() - 40).mean() * 100)
+            return ink, float(o.min())
+
+        ink0, min0 = dust_stats(0.0)
+        ink5, min5 = dust_stats(0.5)
+        assert ink0 < 0.01, f"dust=0 时纸面已有 {ink0:.3f}% 的污点，应为干净"
+        assert ink5 > 0.05, f"dust=0.5 只有 {ink5:.3f}% 的污点，滑块形同虚设"
+        c.detail = (f"dust=0 → {ink0:.3f}% 污点（最暗 {min0:.0f}）；"
+                    f"dust=0.5 → {ink5:.2f}% 污点（最暗 {min5:.0f}）")
+
+    with _check("纵向条纹：方向为竖直（逐列变化、逐行不变）") as c:
+        sp = ScanParams(skew_deg=0.0, noise=0.0, dust=0.0, vignette=0.0,
+                        paper_cloud=0.0, streak=1.0, out_mode="gray")
+        o = np.asarray(effects.simulate(_flat_sheet(), PrintParams(), sp,
+                                        np.random.default_rng(13)), dtype=np.float32)
+        # 竖直条纹：同一列内（沿 y）几乎不变，不同列之间差异大。
+        # std(axis=1) 沿列方向求标准差 → 每行内的横向起伏 → 条纹强度
+        # std(axis=0) 沿行方向求标准差 → 每列内的纵向起伏 → 应为噪声级
+        across = float(o.std(axis=1).mean())
+        along = float(o.std(axis=0).mean())
+        assert across > along * 5, \
+            f"条纹方向不对：横向起伏 {across:.3f} 未远大于纵向起伏 {along:.3f}"
+        c.detail = f"横向起伏 {across:.2f} ≫ 纵向起伏 {along:.3f}（竖直条纹）"
+
+    # ================= 9. 崩溃日志链路 =================
     with _check("崩溃日志写入") as c:
         try:
             raise RuntimeError("selftest 故意抛出的异常（用于验证崩溃记录链路）")
