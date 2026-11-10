@@ -1,17 +1,27 @@
 # -*- coding: utf-8 -*-
-"""发布前隐私自检：扫描所有已跟踪的文本文件，找出本机私有路径、用户名、令牌。"""
+"""发布前隐私自检：扫描所有已跟踪的文本文件，找出本机私有路径、用户名、令牌。
+
+退出码 0 = 干净，1 = 有命中。
+"""
 import io
 import re
 import subprocess
 import sys
+from pathlib import Path
 
-ROOT = r"H:\AIwork\SoftwareProject\PdfPrint"
+# 不能写死本机路径，否则这个脚本自己就成了泄露源
+ROOT = Path(__file__).resolve().parent.parent
 
-files = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
-                       text=True, encoding="utf-8", errors="replace").stdout.split()
+# 检查脚本自身的白名单常量里必然含有路径字面量，扫自己会误报
+SKIP = {"tools/check_privacy.py", "tools/check_release_privacy.py"}
+
+files = subprocess.run(
+    ["git", "-c", "core.quotepath=false", "ls-files"],
+    cwd=str(ROOT), capture_output=True, text=True,
+    encoding="utf-8", errors="replace").stdout.splitlines()
 
 TEXT_EXT = (".py", ".md", ".txt", ".json", ".yml", ".yaml", ".bat", ".ps1",
-            ".spec", ".cfg", ".ini", ".toml")
+            ".spec", ".cfg", ".ini", ".toml", ".gitignore", ".gitattributes")
 
 # 绝对路径：字母盘符 + :\ 或 :/ ，后面跟路径字符
 ABS_PATH = re.compile(r"\b([A-Za-z]):[\\/]([^\s)\"'`]{0,80})")
@@ -31,10 +41,12 @@ ALLOW_PREFIX = (
 
 hits = 0
 for f in files:
+    if f in SKIP:
+        continue
     if not f.lower().endswith(TEXT_EXT):
         continue
     try:
-        text = io.open(f, encoding="utf-8", errors="replace").read()
+        text = io.open(ROOT / f, encoding="utf-8", errors="replace").read()
     except Exception:
         continue
     for lineno, line in enumerate(text.splitlines(), 1):
